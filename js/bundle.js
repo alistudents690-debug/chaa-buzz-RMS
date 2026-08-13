@@ -1,4 +1,4 @@
-// Chaa Buzz Cafe - Full Application Bundle with Enhanced Admin Food & Image Control Panel
+// Chaa Buzz Cafe - Full Application Bundle with Cross-Device Order Sync & Single Passcode Auto-Role System
 
 // ====================================================================
 // 1. DATASET & CONFIGURATION
@@ -11,10 +11,12 @@ const CAFE_INFO = {
   currency: "৳"
 };
 
-const STAFF_PINS = {
-  waiter: "1234",
-  kitchen: "5555",
-  admin: "9999"
+// Security Passcodes mapping to roles:
+// 6002 -> Admin | 1210 -> Chef (Kitchen KDS) | 9100 -> Waiter
+const PASSCODE_ROLES = {
+  "6002": "admin",
+  "1210": "kitchen",
+  "9100": "waiter"
 };
 
 const PRESET_IMAGES = [
@@ -163,7 +165,7 @@ const INITIAL_TABLES = Array.from({ length: 16 }, (_, i) => ({
 }));
 
 // ====================================================================
-// 2. REALTIME STATE ENGINE & STORE
+// 2. HYBRID CROSS-DEVICE REALTIME SYNC ENGINE (Multi-Device PubSub)
 // ====================================================================
 const STORAGE_KEYS = {
   MENU: 'chaa_buzz_menu',
@@ -173,11 +175,16 @@ const STORAGE_KEYS = {
   CART: 'chaa_buzz_cart'
 };
 
+const SYNC_TOPIC = "chaa_buzz_cafe_live_orders_2026";
+const RELAY_ENDPOINT = `https://ntfy.sh/${SYNC_TOPIC}`;
+
 class Store extends EventTarget {
   constructor() {
     super();
     this.broadcast = new BroadcastChannel('chaa_buzz_realtime');
     this.initStorage();
+
+    // 1. Same-device cross-tab broadcast listener
     this.broadcast.onmessage = (event) => {
       if (event.data) {
         this.dispatchEvent(new CustomEvent('state-changed', { detail: event.data }));
@@ -186,6 +193,9 @@ class Store extends EventTarget {
     window.addEventListener('storage', () => {
       this.dispatchEvent(new CustomEvent('state-changed'));
     });
+
+    // 2. Cross-device Realtime Sync Listener (EventSource SSE for live mobile/tablet sync)
+    this.initCrossDeviceSync();
   }
 
   initStorage() {
@@ -220,6 +230,71 @@ class Store extends EventTarget {
     }
   }
 
+  initCrossDeviceSync() {
+    try {
+      if (typeof EventSource !== 'undefined') {
+        const es = new EventSource(`${RELAY_ENDPOINT}/json`);
+        es.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            if (data && data.message) {
+              const payload = JSON.parse(data.message);
+              this.applyIncomingSync(payload);
+            }
+          } catch (err) {}
+        };
+      }
+    } catch (e) {
+      console.log('Cross-device sync fallback initialized:', e);
+    }
+  }
+
+  applyIncomingSync(payload) {
+    if (!payload || !payload.type) return;
+
+    if (payload.type === 'order-created') {
+      const orders = this.getOrders();
+      const exists = orders.some(o => o.id === payload.data.id);
+      if (!exists) {
+        orders.unshift(payload.data);
+        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+        this.playBellSound('new');
+        this.dispatchEvent(new CustomEvent('state-changed'));
+      }
+    } else if (payload.type === 'order-updated') {
+      const orders = this.getOrders();
+      const idx = orders.findIndex(o => o.id === payload.data.id);
+      if (idx >= 0) {
+        orders[idx] = payload.data;
+        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+        if (payload.data.status === 'ready') this.playBellSound('ready');
+        this.dispatchEvent(new CustomEvent('state-changed'));
+      }
+    } else if (payload.type === 'table-cleared') {
+      const orders = this.getOrders().map(o => {
+        if (Number(o.tableNumber) === Number(payload.data.tableNumber) && o.status !== 'completed') {
+          return { ...o, status: 'completed' };
+        }
+        return o;
+      });
+      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+      this.dispatchEvent(new CustomEvent('state-changed'));
+    } else if (payload.type === 'menu-updated') {
+      localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(payload.data));
+      this.dispatchEvent(new CustomEvent('state-changed'));
+    }
+  }
+
+  publishCrossDevice(type, data) {
+    try {
+      fetch(RELAY_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, data, timestamp: Date.now() })
+      }).catch(() => {});
+    } catch (e) {}
+  }
+
   notify(type, payload) {
     const data = { type, payload };
     this.broadcast.postMessage(data);
@@ -240,6 +315,7 @@ class Store extends EventTarget {
     }
     localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(items));
     this.notify('menu-updated');
+    this.publishCrossDevice('menu-updated', items);
   }
 
   toggleStockStatus(id) {
@@ -249,6 +325,7 @@ class Store extends EventTarget {
       item.inStock = !item.inStock;
       localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(items));
       this.notify('menu-updated');
+      this.publishCrossDevice('menu-updated', items);
     }
   }
 
@@ -256,6 +333,7 @@ class Store extends EventTarget {
     const items = this.getMenuItems().filter(i => i.id !== id);
     localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(items));
     this.notify('menu-updated');
+    this.publishCrossDevice('menu-updated', items);
   }
 
   getCategories() {
@@ -287,6 +365,10 @@ class Store extends EventTarget {
     localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
     this.playBellSound('new');
     this.notify('order-created', newOrder);
+
+    // Broadcast across all devices (Mobile QR scan -> Chef KDS / Waiter Panel)
+    this.publishCrossDevice('order-created', newOrder);
+
     return newOrder;
   }
 
@@ -298,6 +380,9 @@ class Store extends EventTarget {
       localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
       if (status === 'ready') this.playBellSound('ready');
       this.notify('order-updated', order);
+
+      // Broadcast update across all devices
+      this.publishCrossDevice('order-updated', order);
     }
   }
 
@@ -308,8 +393,11 @@ class Store extends EventTarget {
       }
       return o;
     });
-    localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(updatedOrders));
+    localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
     this.notify('table-cleared');
+
+    // Broadcast table clear across all devices
+    this.publishCrossDevice('table-cleared', { tableNumber });
   }
 
   getCart() {
@@ -772,7 +860,7 @@ function KitchenDisplay() {
   );
 }
 
-// --- ENHANCED ADMIN CONTROL PANEL (Food Item & Image Manager + Printable QR Cards) ---
+// --- Admin Panel Component ---
 function AdminPanel({ onOpenPrintQr }) {
   const [menuItems, setMenuItems] = useState(store.getMenuItems());
   const [categories] = useState(store.getCategories());
@@ -818,7 +906,6 @@ function AdminPanel({ onOpenPrintQr }) {
 
   return (
     <div className="min-h-screen bg-stone-100 p-4 md:p-8 max-w-6xl mx-auto space-y-6">
-      {/* Header */}
       <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h1 className="text-2xl font-black text-stone-900">Admin Control Panel</h1>
@@ -826,7 +913,6 @@ function AdminPanel({ onOpenPrintQr }) {
         </div>
 
         <div className="flex gap-2">
-          {/* Retained Printable QR Stand Cards Control */}
           <button
             onClick={onOpenPrintQr}
             className="bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs px-4 py-2.5 rounded-2xl shadow transition"
@@ -834,7 +920,6 @@ function AdminPanel({ onOpenPrintQr }) {
             🖨️ Printable QR Cards
           </button>
           
-          {/* Add Food Item Button */}
           <button
             onClick={() => handleOpenForm(null)}
             className="bg-stone-900 hover:bg-stone-800 text-white font-extrabold text-xs px-4 py-2.5 rounded-2xl shadow transition"
@@ -844,7 +929,6 @@ function AdminPanel({ onOpenPrintQr }) {
         </div>
       </div>
 
-      {/* Menu Management Table */}
       <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-200 space-y-4">
         <div className="flex justify-between items-center">
           <h2 className="text-xs font-black uppercase tracking-wider text-stone-500">Café Food Menu ({menuItems.length} Items)</h2>
@@ -894,7 +978,7 @@ function AdminPanel({ onOpenPrintQr }) {
         </div>
       </div>
 
-      {/* Add / Edit Food & Image Modal */}
+      {/* Add / Edit Food Modal */}
       {isFormOpen && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <form onSubmit={handleSaveItem} className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
@@ -924,7 +1008,6 @@ function AdminPanel({ onOpenPrintQr }) {
               </div>
             </div>
 
-            {/* Food Image Selection & Custom URL */}
             <div className="space-y-2">
               <label className="text-xs font-bold text-stone-700 block">Food Image URL</label>
               <input
@@ -937,7 +1020,6 @@ function AdminPanel({ onOpenPrintQr }) {
                 className="w-full bg-stone-50 border rounded-xl p-2.5 text-xs font-mono"
               />
 
-              {/* Quick Image Presets */}
               <div>
                 <span className="text-[10px] font-bold text-stone-500 block mb-1">Quick Select Preset Image:</span>
                 <div className="flex gap-1.5 overflow-x-auto pb-1">
@@ -956,7 +1038,6 @@ function AdminPanel({ onOpenPrintQr }) {
                 </div>
               </div>
 
-              {/* Live Image Preview Thumbnail */}
               {selectedImageUrl && (
                 <div className="flex items-center gap-3 bg-stone-50 p-2 rounded-xl border border-stone-200">
                   <img src={selectedImageUrl} className="w-16 h-16 rounded-lg object-cover" alt="Preview" />
@@ -1054,19 +1135,19 @@ function QrPrintModal({ onClose }) {
   );
 }
 
-// --- Staff Security PIN Authentication Modal ---
+// --- SINGLE PASSCODE AUTO-ROLE DETECTION MODAL ---
 function StaffAuthModal({ onClose, onAuthenticated }) {
-  const [role, setRole] = useState('waiter');
-  const [pin, setPin] = useState('');
+  const [passcode, setPasscode] = useState('');
   const [error, setError] = useState(false);
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (STAFF_PINS[role] === pin) {
-      onAuthenticated(role);
+    const detectedRole = PASSCODE_ROLES[passcode.trim()];
+    if (detectedRole) {
+      onAuthenticated(detectedRole);
     } else {
       setError(true);
-      setPin('');
+      setPasscode('');
     }
   };
 
@@ -1083,28 +1164,20 @@ function StaffAuthModal({ onClose, onAuthenticated }) {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="text-xs font-bold text-stone-700 block mb-1">Select Role</label>
-            <select value={role} onChange={e => setRole(e.target.value)} className="w-full bg-stone-50 border rounded-xl p-2.5 text-xs font-bold">
-              <option value="waiter">🤵 Waiter Panel</option>
-              <option value="kitchen">🍳 Kitchen Chef (KDS)</option>
-              <option value="admin">⚙️ Admin Control Panel</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="text-xs font-bold text-stone-700 block mb-1">Enter Security PIN</label>
+            <label className="text-xs font-bold text-stone-700 block mb-1">Enter Staff Passcode</label>
             <input
               type="password"
               maxLength="4"
-              value={pin}
-              onChange={e => { setPin(e.target.value); setError(false); }}
+              value={passcode}
+              onChange={e => { setPasscode(e.target.value); setError(false); }}
               placeholder="••••"
               required
-              className={`w-full text-center text-xl font-mono tracking-widest bg-stone-50 border rounded-xl p-3 focus:outline-none ${
+              autoFocus
+              className={`w-full text-center text-2xl font-mono tracking-widest bg-stone-50 border rounded-xl p-3 focus:outline-none ${
                 error ? 'border-rose-500 bg-rose-50' : 'focus:border-amber-500'
               }`}
             />
-            {error && <p className="text-[10px] text-rose-600 font-bold mt-1 text-center">Invalid PIN code!</p>}
+            {error && <p className="text-[10px] text-rose-600 font-bold mt-1 text-center">Invalid Passcode! Try again.</p>}
           </div>
 
           <div className="flex gap-2 pt-2">
