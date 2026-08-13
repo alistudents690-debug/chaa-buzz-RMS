@@ -1,0 +1,63 @@
+/* Chaa Buzz Cafe - Premium Apple/Linear/Stripe Aesthetic Stylesheet */
+
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+
+:root {
+  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --radius-card: 16px;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #FAF9F6;
+  color: #1C1917;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Print Styles for QR Table Stand Cards */
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+  #printable-qr-section, #printable-qr-section * {
+    visibility: visible !important;
+  }
+  #printable-qr-section {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    display: grid !important;
+    grid-template-cols: repeat(2, 1fr) !important;
+    gap: 20px !important;
+    padding: 10px !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .page-break-inside-avoid {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+}
+
+/* Glassmorphism */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(229, 231, 235, 0.8);
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.4);
+  border-radius: 9999px;
+}
