@@ -1,4 +1,4 @@
-// Chaa Buzz Cafe - Full Application Bundle with 100% Reliable Cross-Device Order Sync & Single Passcode System
+// Chaa Buzz Cafe - Full Application Bundle with Ultra-Resilient Realtime Sync & Audio Unlock
 
 // ====================================================================
 // 1. DATASET & CONFIGURATION
@@ -11,8 +11,6 @@ const CAFE_INFO = {
   currency: "৳"
 };
 
-// Security Passcodes mapping to roles:
-// 6002 -> Admin | 1210 -> Chef (Kitchen KDS) | 9100 -> Waiter
 const PASSCODE_ROLES = {
   "6002": "admin",
   "1210": "kitchen",
@@ -165,7 +163,7 @@ const INITIAL_TABLES = Array.from({ length: 16 }, (_, i) => ({
 }));
 
 // ====================================================================
-// 2. 100% RELIABLE CROSS-DEVICE REALTIME SYNC ENGINE (SSE + Auto-Poll)
+// 2. ULTRA-RESILIENT MULTI-CHANNEL REALTIME SYNC ENGINE
 // ====================================================================
 const STORAGE_KEYS = {
   MENU: 'chaa_buzz_menu',
@@ -175,7 +173,7 @@ const STORAGE_KEYS = {
   CART: 'chaa_buzz_cart'
 };
 
-const SYNC_TOPIC = "chaa_buzz_cafe_live_orders_2026_v2";
+const SYNC_TOPIC = "chaa_buzz_cafe_live_orders_v3";
 const RELAY_ENDPOINT = `https://ntfy.sh/${SYNC_TOPIC}`;
 
 class Store extends EventTarget {
@@ -184,7 +182,7 @@ class Store extends EventTarget {
     this.broadcast = new BroadcastChannel('chaa_buzz_realtime');
     this.initStorage();
 
-    // 1. Same-device cross-tab broadcast listener
+    // 1. Cross-Tab broadcast
     this.broadcast.onmessage = (event) => {
       if (event.data) {
         this.dispatchEvent(new CustomEvent('state-changed', { detail: event.data }));
@@ -194,7 +192,7 @@ class Store extends EventTarget {
       this.dispatchEvent(new CustomEvent('state-changed'));
     });
 
-    // 2. Cross-device Realtime SSE Stream + Auto-Polling Relay
+    // 2. Cross-Device Realtime SSE Stream + Polling
     this.initCrossDeviceSync();
   }
 
@@ -217,7 +215,7 @@ class Store extends EventTarget {
   }
 
   initCrossDeviceSync() {
-    // A) SSE Live Stream
+    // SSE Stream
     try {
       if (typeof EventSource !== 'undefined') {
         const es = new EventSource(`${RELAY_ENDPOINT}/json`);
@@ -233,29 +231,29 @@ class Store extends EventTarget {
       }
     } catch (e) {}
 
-    // B) Active 2-second Cloud Polling Loop for 100% Cross-Device Guarantee
-    const pollCloudEvents = async () => {
-      try {
-        const res = await fetch(`${RELAY_ENDPOINT}/json?poll=1`);
-        if (res.ok) {
-          const text = await res.text();
-          const lines = text.trim().split('\n');
-          for (const line of lines) {
-            if (!line) continue;
-            try {
-              const msgObj = JSON.parse(line);
-              if (msgObj && msgObj.message) {
-                const payload = JSON.parse(msgObj.message);
-                this.applyIncomingSync(payload);
-              }
-            } catch(e){}
-          }
-        }
-      } catch (err) {}
-    };
+    // Polling loop every 1.5 seconds
+    this.pollCloudEvents();
+    setInterval(() => this.pollCloudEvents(), 1500);
+  }
 
-    pollCloudEvents();
-    setInterval(pollCloudEvents, 2000); // Polls every 2s across devices
+  async pollCloudEvents() {
+    try {
+      const res = await fetch(`${RELAY_ENDPOINT}/json?poll=1`);
+      if (res.ok) {
+        const text = await res.text();
+        const lines = text.trim().split('\n');
+        for (const line of lines) {
+          if (!line) continue;
+          try {
+            const msgObj = JSON.parse(line);
+            if (msgObj && msgObj.message) {
+              const payload = JSON.parse(msgObj.message);
+              this.applyIncomingSync(payload);
+            }
+          } catch(e){}
+        }
+      }
+    } catch (err) {}
   }
 
   applyIncomingSync(payload) {
@@ -375,7 +373,7 @@ class Store extends EventTarget {
     this.playBellSound('new');
     this.notify('order-created', newOrder);
 
-    // Broadcast across all devices (Mobile QR scan -> Chef KDS / Waiter Panel)
+    // Broadcast across all devices
     this.publishCrossDevice('order-created', newOrder);
 
     return newOrder;
@@ -748,9 +746,19 @@ function WaiterDashboard() {
     <div className="min-h-screen bg-stone-100 p-6 max-w-6xl mx-auto space-y-6">
       <div className="bg-white p-6 rounded-3xl shadow-sm border flex justify-between items-center">
         <div>
-          <h1 className="text-xl font-bold">Waiter Service Dashboard</h1>
-          <p className="text-xs text-stone-500">Floor Overview & Active Table Orders (Live Cross-Device Sync)</p>
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+            <h1 className="text-xl font-bold">Waiter Service Dashboard</h1>
+          </div>
+          <p className="text-xs text-stone-500">Floor Overview & Active Table Orders (Live Sync Active)</p>
         </div>
+
+        <button
+          onClick={() => store.pollCloudEvents()}
+          className="bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-bold px-3 py-2 rounded-xl flex items-center gap-1.5"
+        >
+          <span>🔄 Sync Orders Now</span>
+        </button>
       </div>
 
       <div className="bg-white p-6 rounded-3xl shadow-sm border">
@@ -826,10 +834,21 @@ function KitchenDisplay() {
     <div className="min-h-screen bg-stone-950 text-white p-6 max-w-7xl mx-auto space-y-6">
       <div className="flex justify-between items-center border-b border-stone-800 pb-4">
         <div>
-          <h1 className="text-xl font-bold text-amber-400">Kitchen Display System (KDS)</h1>
-          <p className="text-xs text-stone-400 mt-0.5">Live Realtime Mobile QR Sync Stream</p>
+          <div className="flex items-center gap-2">
+            <span className="w-3 h-3 rounded-full bg-emerald-400 animate-pulse" />
+            <h1 className="text-xl font-bold text-amber-400">Kitchen Display System (KDS)</h1>
+          </div>
+          <p className="text-xs text-stone-400 mt-0.5">Live Realtime Cross-Device Sync Stream (1.5s Auto-Poll)</p>
         </div>
-        <span className="text-xs bg-stone-900 border border-stone-800 px-3 py-1 rounded-full">{kitchenOrders.length} Active Orders</span>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => store.pollCloudEvents()}
+            className="bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1.5"
+          >
+            <span>🔄 Force Sync</span>
+          </button>
+          <span className="text-xs bg-stone-900 border border-stone-800 px-3 py-1.5 rounded-full">{kitchenOrders.length} Active Orders</span>
+        </div>
       </div>
 
       {kitchenOrders.length === 0 ? (
