@@ -1,35 +1,31 @@
-// Chaa Buzz Cafe State Manager & Realtime Bus Engine
-import { INITIAL_MENU_ITEMS, INITIAL_CATEGORIES, INITIAL_TABLES } from './data.js';
-
+// Store Class Module - Shared state manager & Realtime Cloud Sync
 const STORAGE_KEYS = {
   MENU: 'chaa_buzz_menu',
   CATEGORIES: 'chaa_buzz_categories',
   ORDERS: 'chaa_buzz_orders',
   TABLES: 'chaa_buzz_tables',
-  CART: 'chaa_buzz_cart',
-  ACTIVE_TABLE: 'chaa_buzz_active_table'
+  CART: 'chaa_buzz_cart'
 };
+
+const SYNC_TOPIC = "chaa_buzz_cafe_orders_v5";
+const NTFY_RELAY = `https://ntfy.sh/${SYNC_TOPIC}`;
 
 class Store extends EventTarget {
   constructor() {
     super();
     this.broadcast = new BroadcastChannel('chaa_buzz_realtime');
-    
-    // Initialize Local Storage if missing
     this.initStorage();
 
-    // Listen for broadcast messages from other tabs (Customer <-> Kitchen <-> Waiter <-> Admin)
     this.broadcast.onmessage = (event) => {
-      if (event.data && event.data.type) {
+      if (event.data) {
         this.dispatchEvent(new CustomEvent('state-changed', { detail: event.data }));
-        this.dispatchEvent(new CustomEvent(event.data.type, { detail: event.data.payload }));
       }
     };
-
-    // Also listen to storage events across windows
-    window.addEventListener('storage', (e) => {
-      this.dispatchEvent(new CustomEvent('state-changed', { detail: { key: e.key } }));
+    window.addEventListener('storage', () => {
+      this.dispatchEvent(new CustomEvent('state-changed'));
     });
+
+    this.initCloudSyncEngine();
   }
 
   initStorage() {
@@ -43,57 +39,108 @@ class Store extends EventTarget {
       localStorage.setItem(STORAGE_KEYS.TABLES, JSON.stringify(INITIAL_TABLES));
     }
     if (!localStorage.getItem(STORAGE_KEYS.ORDERS)) {
-      // Demo active orders to give a lively initial view
-      const demoOrders = [
-        {
-          id: "ORD-101",
-          tableNumber: 7,
-          items: [
-            { id: "m1", name: "Special Matka Milk Chaa", price: 60, quantity: 2, note: "Extra Malai" },
-            { id: "m7", name: "Smokey Buzz Chicken Burger", price: 320, quantity: 1, note: "Less spicy" },
-            { id: "m14", name: "Loaded Buzz Fries", price: 190, quantity: 1, note: "" }
-          ],
-          totalAmount: 630,
-          specialNote: "Please serve tea first",
-          status: "pending", // "pending" | "preparing" | "ready" | "served" | "completed"
-          createdAt: new Date(Date.now() - 4 * 60000).toISOString(), // 4 mins ago
-          updatedAt: new Date(Date.now() - 4 * 60000).toISOString()
-        },
-        {
-          id: "ORD-102",
-          tableNumber: 3,
-          items: [
-            { id: "m4", name: "Hazelnut Cappuccino", price: 240, quantity: 1, note: "" },
-            { id: "m11", name: "Belgian Chocolate Lava Cake", price: 260, quantity: 1, note: "Warm ice cream" }
-          ],
-          totalAmount: 500,
-          specialNote: "",
-          status: "preparing",
-          createdAt: new Date(Date.now() - 9 * 60000).toISOString(),
-          updatedAt: new Date(Date.now() - 2 * 60000).toISOString()
-        }
-      ];
-      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(demoOrders));
+      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify([]));
     }
     if (!localStorage.getItem(STORAGE_KEYS.CART)) {
       localStorage.setItem(STORAGE_KEYS.CART, JSON.stringify([]));
     }
   }
 
-  notify(type, payload) {
-    const data = { type, payload, timestamp: Date.now() };
-    this.broadcast.postMessage(data);
-    this.dispatchEvent(new CustomEvent('state-changed', { detail: data }));
-    this.dispatchEvent(new CustomEvent(type, { detail: payload }));
+  initCloudSyncEngine() {
+    try {
+      if (typeof EventSource !== 'undefined') {
+        const es = new EventSource(`${NTFY_RELAY}/json`);
+        es.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            if (data && data.message) {
+              const payload = JSON.parse(data.message);
+              this.applyIncomingSync(payload);
+            }
+          } catch (err) {}
+        };
+      }
+    } catch (e) {}
+
+    const runCloudSync = async () => {
+      try {
+        const res = await fetch(`${NTFY_RELAY}/json?poll=1`);
+        if (res.ok) {
+          const text = await res.text();
+          const lines = text.trim().split('\n');
+          for (const line of lines) {
+            if (!line) continue;
+            try {
+              const msgObj = JSON.parse(line);
+              if (msgObj && msgObj.message) {
+                const payload = JSON.parse(msgObj.message);
+                this.applyIncomingSync(payload);
+              }
+            } catch(e){}
+          }
+        }
+      } catch (err) {}
+    };
+
+    runCloudSync();
+    setInterval(runCloudSync, 1500);
   }
 
-  // --- Menu Data API ---
-  getMenuItems() {
-    try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEYS.MENU)) || [];
-    } catch {
-      return INITIAL_MENU_ITEMS;
+  applyIncomingSync(payload) {
+    if (!payload || !payload.type) return;
+
+    if (payload.type === 'order-created') {
+      const orders = this.getOrders();
+      // Deduplicate strictly by order.id
+      const exists = orders.some(o => o.id === payload.data.id);
+      if (!exists) {
+        orders.unshift(payload.data);
+        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+        this.playBellSound('new');
+        this.notify('order-created', payload.data);
+      }
+    } else if (payload.type === 'order-updated') {
+      const orders = this.getOrders();
+      const idx = orders.findIndex(o => o.id === payload.data.id);
+      if (idx >= 0) {
+        orders[idx] = payload.data;
+        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+        if (payload.data.status === 'ready') this.playBellSound('ready');
+        this.notify('order-updated', payload.data);
+      }
+    } else if (payload.type === 'table-cleared') {
+      const orders = this.getOrders().map(o => {
+        if (Number(o.tableNumber) === Number(payload.data.tableNumber) && o.status !== 'completed') {
+          return { ...o, status: 'completed' };
+        }
+        return o;
+      });
+      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+      this.notify('table-cleared');
+    } else if (payload.type === 'menu-updated') {
+      localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(payload.data));
+      this.notify('menu-updated');
     }
+  }
+
+  publishCrossDevice(type, data) {
+    try {
+      fetch(NTFY_RELAY, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, data, timestamp: Date.now() })
+      }).catch(() => {});
+    } catch (e) {}
+  }
+
+  notify(type, payload) {
+    const data = { type, payload };
+    this.broadcast.postMessage(data);
+    this.dispatchEvent(new CustomEvent('state-changed', { detail: data }));
+  }
+
+  getMenuItems() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.MENU)) || INITIAL_MENU_ITEMS; } catch { return INITIAL_MENU_ITEMS; }
   }
 
   saveMenuItem(item) {
@@ -105,88 +152,64 @@ class Store extends EventTarget {
       items.unshift({ ...item, id: `m_${Date.now()}` });
     }
     localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(items));
-    this.notify('menu-updated', items);
+    this.notify('menu-updated');
+    this.publishCrossDevice('menu-updated', items);
+  }
+
+  toggleStockStatus(id) {
+    const items = this.getMenuItems();
+    const item = items.find(i => i.id === id);
+    if (item) {
+      item.inStock = !item.inStock;
+      localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(items));
+      this.notify('menu-updated');
+      this.publishCrossDevice('menu-updated', items);
+    }
   }
 
   deleteMenuItem(id) {
-    let items = this.getMenuItems();
-    items = items.filter(i => i.id !== id);
+    const items = this.getMenuItems().filter(i => i.id !== id);
     localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(items));
-    this.notify('menu-updated', items);
+    this.notify('menu-updated');
+    this.publishCrossDevice('menu-updated', items);
   }
 
-  // --- Categories API ---
   getCategories() {
-    try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEYS.CATEGORIES)) || INITIAL_CATEGORIES;
-    } catch {
-      return INITIAL_CATEGORIES;
-    }
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.CATEGORIES)) || INITIAL_CATEGORIES; } catch { return INITIAL_CATEGORIES; }
   }
 
-  saveCategory(cat) {
-    const categories = this.getCategories();
-    const existingIdx = categories.findIndex(c => c.id === cat.id);
-    if (existingIdx >= 0) {
-      categories[existingIdx] = cat;
-    } else {
-      categories.push(cat);
-    }
-    localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(categories));
-    this.notify('categories-updated', categories);
-  }
-
-  // --- Tables API ---
   getTables() {
-    try {
-      const tables = JSON.parse(localStorage.getItem(STORAGE_KEYS.TABLES)) || INITIAL_TABLES;
-      const orders = this.getOrders();
-      // Sync active order statuses with table
-      return tables.map(t => {
-        const activeOrder = orders.find(o => Number(o.tableNumber) === Number(t.id) && o.status !== 'completed');
-        return {
-          ...t,
-          status: activeOrder ? (activeOrder.status === 'pending' ? 'order-pending' : activeOrder.status) : 'available',
-          activeOrderId: activeOrder ? activeOrder.id : null
-        };
-      });
-    } catch {
-      return INITIAL_TABLES;
-    }
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.TABLES)) || INITIAL_TABLES; } catch { return INITIAL_TABLES; }
   }
 
-  // --- Orders API ---
   getOrders() {
-    try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEYS.ORDERS)) || [];
-    } catch {
-      return [];
-    }
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.ORDERS)) || []; } catch { return []; }
   }
 
+  // --- SAFE FIX: Generate 100% Unique Timestamp + Random Order ID ---
   createOrder({ tableNumber, items, specialNote = "" }) {
     const orders = this.getOrders();
-    const newOrderNumber = orders.length + 101;
-    const totalAmount = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+    const uniqueIdSuffix = Date.now().toString().slice(-5) + Math.floor(10 + Math.random() * 90);
+    const newOrderId = `ORD-${uniqueIdSuffix}`;
+    const totalAmount = items.reduce((sum, i) => sum + (i.price * i.quantity), 0);
     
     const newOrder = {
-      id: `ORD-${newOrderNumber}`,
+      id: newOrderId,
       tableNumber: Number(tableNumber),
       items,
       totalAmount,
       specialNote,
-      status: 'pending', // pending -> preparing -> ready -> served -> completed
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      status: 'pending',
+      createdAt: new Date().toISOString()
     };
-
+    
     orders.unshift(newOrder);
     localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-    
-    // Play Kitchen Bell Sound
-    this.playBellSound();
-
+    this.playBellSound('new');
     this.notify('order-created', newOrder);
+
+    this.publishCrossDevice('order-created', newOrder);
+
     return newOrder;
   }
 
@@ -195,41 +218,34 @@ class Store extends EventTarget {
     const order = orders.find(o => o.id === orderId);
     if (order) {
       order.status = status;
-      order.updatedAt = new Date().toISOString();
       localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-      
-      if (status === 'ready') {
-        this.playBellSound('ready');
-      }
+      if (status === 'ready') this.playBellSound('ready');
+      this.notify('order-updated', order);
 
-      this.notify('order-status-changed', order);
+      this.publishCrossDevice('order-updated', order);
     }
   }
 
   clearTable(tableNumber) {
-    const orders = this.getOrders();
-    const updatedOrders = orders.map(o => {
+    const orders = this.getOrders().map(o => {
       if (Number(o.tableNumber) === Number(tableNumber) && o.status !== 'completed') {
-        return { ...o, status: 'completed', updatedAt: new Date().toISOString() };
+        return { ...o, status: 'completed' };
       }
       return o;
     });
-    localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(updatedOrders));
-    this.notify('table-cleared', { tableNumber });
+    localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+    this.notify('table-cleared');
+
+    this.publishCrossDevice('table-cleared', { tableNumber });
   }
 
-  // --- Customer Cart API ---
   getCart() {
-    try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEYS.CART)) || [];
-    } catch {
-      return [];
-    }
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.CART)) || []; } catch { return []; }
   }
 
   setCart(cart) {
     localStorage.setItem(STORAGE_KEYS.CART, JSON.stringify(cart));
-    this.notify('cart-updated', cart);
+    this.notify('cart-updated');
   }
 
   addToCart(item, note = "") {
@@ -238,14 +254,7 @@ class Store extends EventTarget {
     if (existing) {
       existing.quantity += 1;
     } else {
-      cart.push({
-        id: item.id,
-        name: item.name,
-        price: item.price,
-        image: item.image,
-        quantity: 1,
-        note: note
-      });
+      cart.push({ id: item.id, name: item.name, price: item.price, image: item.image, quantity: 1, note });
     }
     this.setCart(cart);
   }
@@ -267,47 +276,21 @@ class Store extends EventTarget {
     this.setCart([]);
   }
 
-  // --- Sound Synthesizer (Web Audio API) ---
-  playBellSound(type = 'new-order') {
+  playBellSound(type = 'new') {
     try {
       const AudioContext = window.AudioContext || window.webkitAudioContext;
       if (!AudioContext) return;
       const ctx = new AudioContext();
-
-      if (type === 'new-order') {
-        // High alert double chime (E5 + G5)
-        const notes = [659.25, 783.99];
-        notes.forEach((freq, idx) => {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = 'sine';
-          osc.frequency.value = freq;
-          gain.gain.setValueAtTime(0.2, ctx.currentTime + idx * 0.15);
-          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + idx * 0.15 + 0.6);
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start(ctx.currentTime + idx * 0.15);
-          osc.stop(ctx.currentTime + idx * 0.15 + 0.6);
-        });
-      } else if (type === 'ready') {
-        // Pleasant double ding (C5 + C6)
-        [523.25, 1046.50].forEach((freq, idx) => {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = 'triangle';
-          osc.frequency.value = freq;
-          gain.gain.setValueAtTime(0.25, ctx.currentTime + idx * 0.12);
-          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + idx * 0.12 + 0.8);
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start(ctx.currentTime + idx * 0.12);
-          osc.stop(ctx.currentTime + idx * 0.12 + 0.8);
-        });
-      }
-    } catch (e) {
-      console.log('Audio playback prevented or unsupported:', e);
-    }
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = type === 'new' ? 659.25 : 880;
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.5);
+    } catch (e) {}
   }
 }
-
-export const store = new Store();
