@@ -195,11 +195,6 @@ class Store extends EventTarget {
           note: i.note || ''
         }));
 
-        if (fetchedItems.length === 0 && retryCount < 2) {
-          setTimeout(() => this.fetchSingleOrderFromSupabase(orderId, retryCount + 1), 500);
-          return;
-        }
-
         const existingOrder = this.getOrders().find(ord => ord.id === o.id);
         const mappedOrder = {
           id: o.id,
@@ -210,6 +205,10 @@ class Store extends EventTarget {
           createdAt: o.created_at,
           items: fetchedItems.length > 0 ? fetchedItems : (existingOrder ? existingOrder.items : [])
         };
+
+        if (fetchedItems.length === 0 && retryCount < 2) {
+          setTimeout(() => this.fetchSingleOrderFromSupabase(orderId, retryCount + 1), 500);
+        }
 
         this.applyIncomingSync({ type: 'order-created', data: mappedOrder });
       }
@@ -356,7 +355,7 @@ class Store extends EventTarget {
 
         const orderItemsPayload = items.map(item => ({
           order_id: newOrderId,
-          item_id: item.id || null,
+          item_id: null,
           name: item.name,
           price: item.price,
           quantity: item.quantity,

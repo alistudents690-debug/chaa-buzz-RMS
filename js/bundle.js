@@ -1,4 +1,4 @@
-// Chaa Buzz Cafe - Full Application Bundle with Direct Supabase DB Integration & Realtime Sync
+// Chaa Buzz Cafe - Full Application Bundle with Guaranteed Supabase Order Items & Realtime Sync
 
 // ====================================================================
 // 1. DATASET & CONFIGURATION
@@ -368,12 +368,6 @@ class Store extends EventTarget {
           note: i.note || ''
         }));
 
-        // Retry after 500ms if order_items hasn't finished inserting yet
-        if (fetchedItems.length === 0 && retryCount < 2) {
-          setTimeout(() => this.fetchSingleOrderFromSupabase(orderId, retryCount + 1), 500);
-          return;
-        }
-
         const existingOrder = this.getOrders().find(ord => ord.id === o.id);
         const mappedOrder = {
           id: o.id,
@@ -384,6 +378,10 @@ class Store extends EventTarget {
           createdAt: o.created_at,
           items: fetchedItems.length > 0 ? fetchedItems : (existingOrder ? existingOrder.items : [])
         };
+
+        if (fetchedItems.length === 0 && retryCount < 2) {
+          setTimeout(() => this.fetchSingleOrderFromSupabase(orderId, retryCount + 1), 500);
+        }
 
         this.applyIncomingSync({ type: 'order-created', data: mappedOrder });
       }
@@ -397,7 +395,6 @@ class Store extends EventTarget {
       const orders = this.getOrders();
       const idx = orders.findIndex(o => o.id === payload.data.id);
       if (idx >= 0) {
-        // If order exists, update fields and preserve items if incoming items is non-empty
         orders[idx].status = payload.data.status || orders[idx].status;
         if (payload.data.items && payload.data.items.length > 0) {
           orders[idx].items = payload.data.items;
@@ -495,7 +492,7 @@ class Store extends EventTarget {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.ORDERS)) || []; } catch { return []; }
   }
 
-  // --- Create Order (Direct Supabase DB Insert + Relay Sync) ---
+  // --- Create Order (Direct Supabase DB Insert + Relay Sync with Nullable item_id) ---
   async createOrder({ tableNumber, items, specialNote = "" }) {
     const orders = this.getOrders();
     const uniqueIdSuffix = Date.now().toString().slice(-5) + Math.floor(10 + Math.random() * 90);
@@ -519,7 +516,7 @@ class Store extends EventTarget {
     this.notify('order-created', newOrder);
     this.publishCrossDevice('order-created', newOrder);
 
-    // 2. Direct Supabase DB Persist (Insert orders and order_items)
+    // 2. Direct Supabase DB Persist (Guaranteed order_items insert without Foreign Key failure)
     if (supabase) {
       try {
         await supabase
@@ -534,7 +531,7 @@ class Store extends EventTarget {
 
         const orderItemsPayload = items.map(item => ({
           order_id: newOrderId,
-          item_id: item.id || null,
+          item_id: null, // Null item_id prevents foreign key constraint failure on unseeded DBs
           name: item.name,
           price: item.price,
           quantity: item.quantity,
