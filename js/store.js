@@ -10,6 +10,12 @@ const STORAGE_KEYS = {
 const SYNC_TOPIC = "chaa_buzz_cafe_orders_v5";
 const NTFY_RELAY = `https://ntfy.sh/${SYNC_TOPIC}`;
 
+const SUPABASE_URL = "https://umnbgjhhcvmkcdibmsdr.supabase.co";
+const SUPABASE_KEY = "sb_publishable_CdBFJUtArtuAyveQue5aQQ_UnkXlRkt";
+const supabase = (window.supabase && window.supabase.createClient) 
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) 
+  : null;
+
 class Store extends EventTarget {
   constructor() {
     super();
@@ -47,6 +53,30 @@ class Store extends EventTarget {
   }
 
   initCloudSyncEngine() {
+    if (supabase) {
+      this.fetchOrdersFromSupabase();
+
+      try {
+        supabase
+          .channel('public:orders')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload) => {
+            if (payload.eventType === 'INSERT') {
+              this.fetchSingleOrderFromSupabase(payload.new.id);
+            } else if (payload.eventType === 'UPDATE') {
+              const orders = this.getOrders();
+              const idx = orders.findIndex(o => o.id === payload.new.id);
+              if (idx >= 0) {
+                orders[idx].status = payload.new.status;
+                localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+                if (payload.new.status === 'ready') this.playBellSound('ready');
+                this.notify('order-updated', orders[idx]);
+              }
+            }
+          })
+          .subscribe();
+      } catch (err) {}
+    }
+
     try {
       if (typeof EventSource !== 'undefined') {
         const es = new EventSource(`${NTFY_RELAY}/json`);
@@ -86,27 +116,131 @@ class Store extends EventTarget {
     setInterval(runCloudSync, 1500);
   }
 
+  async fetchOrdersFromSupabase() {
+    if (!supabase) return;
+    try {
+      const { data: dbOrders, error } = await supabase
+        .from('orders')
+        .select(`
+          id,
+          table_number,
+          total_amount,
+          special_note,
+          status,
+          created_at,
+          order_items (
+            name,
+            price,
+            quantity,
+            note
+          )
+        `)
+        .order('created_at', { ascending: false });
+
+      if (!error && dbOrders) {
+        const existingOrders = this.getOrders();
+        const mapped = dbOrders.map(o => {
+          const existing = existingOrders.find(e => e.id === o.id);
+          const fetchedItems = (o.order_items || []).map(i => ({
+            name: i.name,
+            price: Number(i.price),
+            quantity: i.quantity,
+            note: i.note || ''
+          }));
+
+          return {
+            id: o.id,
+            tableNumber: o.table_number,
+            totalAmount: Number(o.total_amount),
+            specialNote: o.special_note || '',
+            status: o.status,
+            createdAt: o.created_at,
+            items: fetchedItems.length > 0 ? fetchedItems : (existing ? existing.items : [])
+          };
+        });
+
+        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(mapped));
+        this.notify('orders-loaded');
+      }
+    } catch (err) {}
+  }
+
+  async fetchSingleOrderFromSupabase(orderId, retryCount = 0) {
+    if (!supabase) return;
+    try {
+      const { data: o, error } = await supabase
+        .from('orders')
+        .select(`
+          id,
+          table_number,
+          total_amount,
+          special_note,
+          status,
+          created_at,
+          order_items (
+            name,
+            price,
+            quantity,
+            note
+          )
+        `)
+        .eq('id', orderId)
+        .single();
+
+      if (!error && o) {
+        const fetchedItems = (o.order_items || []).map(i => ({
+          name: i.name,
+          price: Number(i.price),
+          quantity: i.quantity,
+          note: i.note || ''
+        }));
+
+        if (fetchedItems.length === 0 && retryCount < 2) {
+          setTimeout(() => this.fetchSingleOrderFromSupabase(orderId, retryCount + 1), 500);
+          return;
+        }
+
+        const existingOrder = this.getOrders().find(ord => ord.id === o.id);
+        const mappedOrder = {
+          id: o.id,
+          tableNumber: o.table_number,
+          totalAmount: Number(o.total_amount),
+          specialNote: o.special_note || '',
+          status: o.status,
+          createdAt: o.created_at,
+          items: fetchedItems.length > 0 ? fetchedItems : (existingOrder ? existingOrder.items : [])
+        };
+
+        this.applyIncomingSync({ type: 'order-created', data: mappedOrder });
+      }
+    } catch (err) {}
+  }
+
   applyIncomingSync(payload) {
     if (!payload || !payload.type) return;
 
     if (payload.type === 'order-created') {
       const orders = this.getOrders();
-      // Deduplicate strictly by order.id
-      const exists = orders.some(o => o.id === payload.data.id);
-      if (!exists) {
+      const idx = orders.findIndex(o => o.id === payload.data.id);
+      if (idx >= 0) {
+        orders[idx].status = payload.data.status || orders[idx].status;
+        if (payload.data.items && payload.data.items.length > 0) {
+          orders[idx].items = payload.data.items;
+        }
+      } else {
         orders.unshift(payload.data);
-        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-        this.playBellSound('new');
-        this.notify('order-created', payload.data);
       }
+      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+      this.playBellSound('new');
+      this.notify('order-created', payload.data);
     } else if (payload.type === 'order-updated') {
       const orders = this.getOrders();
       const idx = orders.findIndex(o => o.id === payload.data.id);
       if (idx >= 0) {
-        orders[idx] = payload.data;
+        orders[idx] = { ...orders[idx], ...payload.data };
         localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
         if (payload.data.status === 'ready') this.playBellSound('ready');
-        this.notify('order-updated', payload.data);
+        this.notify('order-updated', orders[idx]);
       }
     } else if (payload.type === 'table-cleared') {
       const orders = this.getOrders().map(o => {
@@ -186,8 +320,7 @@ class Store extends EventTarget {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.ORDERS)) || []; } catch { return []; }
   }
 
-  // --- SAFE FIX: Generate 100% Unique Timestamp + Random Order ID ---
-  createOrder({ tableNumber, items, specialNote = "" }) {
+  async createOrder({ tableNumber, items, specialNote = "" }) {
     const orders = this.getOrders();
     const uniqueIdSuffix = Date.now().toString().slice(-5) + Math.floor(10 + Math.random() * 90);
     const newOrderId = `ORD-${uniqueIdSuffix}`;
@@ -207,8 +340,34 @@ class Store extends EventTarget {
     localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
     this.playBellSound('new');
     this.notify('order-created', newOrder);
-
     this.publishCrossDevice('order-created', newOrder);
+
+    if (supabase) {
+      try {
+        await supabase
+          .from('orders')
+          .insert([{
+            id: newOrderId,
+            table_number: Number(tableNumber),
+            total_amount: totalAmount,
+            special_note: specialNote || '',
+            status: 'pending'
+          }]);
+
+        const orderItemsPayload = items.map(item => ({
+          order_id: newOrderId,
+          item_id: item.id || null,
+          name: item.name,
+          price: item.price,
+          quantity: item.quantity,
+          note: item.note || ''
+        }));
+
+        await supabase
+          .from('order_items')
+          .insert(orderItemsPayload);
+      } catch (err) {}
+    }
 
     return newOrder;
   }
@@ -221,8 +380,17 @@ class Store extends EventTarget {
       localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
       if (status === 'ready') this.playBellSound('ready');
       this.notify('order-updated', order);
-
       this.publishCrossDevice('order-updated', order);
+
+      if (supabase) {
+        supabase
+          .from('orders')
+          .update({ status, updated_at: new Date().toISOString() })
+          .eq('id', orderId)
+          .then(({ error }) => {
+            if (error) console.error("Supabase status update error:", error);
+          });
+      }
     }
   }
 
@@ -235,8 +403,18 @@ class Store extends EventTarget {
     });
     localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
     this.notify('table-cleared');
-
     this.publishCrossDevice('table-cleared', { tableNumber });
+
+    if (supabase) {
+      supabase
+        .from('orders')
+        .update({ status: 'completed', updated_at: new Date().toISOString() })
+        .eq('table_number', Number(tableNumber))
+        .neq('status', 'completed')
+        .then(({ error }) => {
+          if (error) console.error("Supabase table clear error:", error);
+        });
+    }
   }
 
   getCart() {

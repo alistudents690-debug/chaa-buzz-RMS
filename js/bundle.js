@@ -311,20 +311,26 @@ class Store extends EventTarget {
         .order('created_at', { ascending: false });
 
       if (!error && dbOrders) {
-        const mapped = dbOrders.map(o => ({
-          id: o.id,
-          tableNumber: o.table_number,
-          totalAmount: Number(o.total_amount),
-          specialNote: o.special_note || '',
-          status: o.status,
-          createdAt: o.created_at,
-          items: (o.order_items || []).map(i => ({
+        const existingOrders = this.getOrders();
+        const mapped = dbOrders.map(o => {
+          const existing = existingOrders.find(e => e.id === o.id);
+          const fetchedItems = (o.order_items || []).map(i => ({
             name: i.name,
             price: Number(i.price),
             quantity: i.quantity,
             note: i.note || ''
-          }))
-        }));
+          }));
+
+          return {
+            id: o.id,
+            tableNumber: o.table_number,
+            totalAmount: Number(o.total_amount),
+            specialNote: o.special_note || '',
+            status: o.status,
+            createdAt: o.created_at,
+            items: fetchedItems.length > 0 ? fetchedItems : (existing ? existing.items : [])
+          };
+        });
 
         localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(mapped));
         this.notify('orders-loaded');
@@ -332,7 +338,7 @@ class Store extends EventTarget {
     } catch (err) {}
   }
 
-  async fetchSingleOrderFromSupabase(orderId) {
+  async fetchSingleOrderFromSupabase(orderId, retryCount = 0) {
     if (!supabase) return;
     try {
       const { data: o, error } = await supabase
@@ -355,6 +361,20 @@ class Store extends EventTarget {
         .single();
 
       if (!error && o) {
+        const fetchedItems = (o.order_items || []).map(i => ({
+          name: i.name,
+          price: Number(i.price),
+          quantity: i.quantity,
+          note: i.note || ''
+        }));
+
+        // Retry after 500ms if order_items hasn't finished inserting yet
+        if (fetchedItems.length === 0 && retryCount < 2) {
+          setTimeout(() => this.fetchSingleOrderFromSupabase(orderId, retryCount + 1), 500);
+          return;
+        }
+
+        const existingOrder = this.getOrders().find(ord => ord.id === o.id);
         const mappedOrder = {
           id: o.id,
           tableNumber: o.table_number,
@@ -362,13 +382,9 @@ class Store extends EventTarget {
           specialNote: o.special_note || '',
           status: o.status,
           createdAt: o.created_at,
-          items: (o.order_items || []).map(i => ({
-            name: i.name,
-            price: Number(i.price),
-            quantity: i.quantity,
-            note: i.note || ''
-          }))
+          items: fetchedItems.length > 0 ? fetchedItems : (existingOrder ? existingOrder.items : [])
         };
+
         this.applyIncomingSync({ type: 'order-created', data: mappedOrder });
       }
     } catch (err) {}
@@ -379,21 +395,27 @@ class Store extends EventTarget {
 
     if (payload.type === 'order-created') {
       const orders = this.getOrders();
-      const exists = orders.some(o => o.id === payload.data.id);
-      if (!exists) {
+      const idx = orders.findIndex(o => o.id === payload.data.id);
+      if (idx >= 0) {
+        // If order exists, update fields and preserve items if incoming items is non-empty
+        orders[idx].status = payload.data.status || orders[idx].status;
+        if (payload.data.items && payload.data.items.length > 0) {
+          orders[idx].items = payload.data.items;
+        }
+      } else {
         orders.unshift(payload.data);
-        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-        this.playBellSound('new');
-        this.notify('order-created', payload.data);
       }
+      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+      this.playBellSound('new');
+      this.notify('order-created', payload.data);
     } else if (payload.type === 'order-updated') {
       const orders = this.getOrders();
       const idx = orders.findIndex(o => o.id === payload.data.id);
       if (idx >= 0) {
-        orders[idx] = payload.data;
+        orders[idx] = { ...orders[idx], ...payload.data };
         localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
         if (payload.data.status === 'ready') this.playBellSound('ready');
-        this.notify('order-updated', payload.data);
+        this.notify('order-updated', orders[idx]);
       }
     } else if (payload.type === 'table-cleared') {
       const orders = this.getOrders().map(o => {
@@ -474,7 +496,7 @@ class Store extends EventTarget {
   }
 
   // --- Create Order (Direct Supabase DB Insert + Relay Sync) ---
-  createOrder({ tableNumber, items, specialNote = "" }) {
+  async createOrder({ tableNumber, items, specialNote = "" }) {
     const orders = this.getOrders();
     const uniqueIdSuffix = Date.now().toString().slice(-5) + Math.floor(10 + Math.random() * 90);
     const newOrderId = `ORD-${uniqueIdSuffix}`;
@@ -490,43 +512,39 @@ class Store extends EventTarget {
       createdAt: new Date().toISOString()
     };
     
-    // 1. Local & Relay Update
+    // 1. Local & Relay Update (Instant UI responsiveness)
     orders.unshift(newOrder);
     localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
     this.playBellSound('new');
     this.notify('order-created', newOrder);
     this.publishCrossDevice('order-created', newOrder);
 
-    // 2. Direct Supabase DB Persist
+    // 2. Direct Supabase DB Persist (Insert orders and order_items)
     if (supabase) {
-      supabase
-        .from('orders')
-        .insert([{
-          id: newOrderId,
-          table_number: Number(tableNumber),
-          total_amount: totalAmount,
-          special_note: specialNote || '',
-          status: 'pending'
-        }])
-        .then(({ error }) => {
-          if (error) console.error("Supabase order insert error:", error);
-        });
+      try {
+        await supabase
+          .from('orders')
+          .insert([{
+            id: newOrderId,
+            table_number: Number(tableNumber),
+            total_amount: totalAmount,
+            special_note: specialNote || '',
+            status: 'pending'
+          }]);
 
-      const orderItemsPayload = items.map(item => ({
-        order_id: newOrderId,
-        item_id: item.id || null,
-        name: item.name,
-        price: item.price,
-        quantity: item.quantity,
-        note: item.note || ''
-      }));
+        const orderItemsPayload = items.map(item => ({
+          order_id: newOrderId,
+          item_id: item.id || null,
+          name: item.name,
+          price: item.price,
+          quantity: item.quantity,
+          note: item.note || ''
+        }));
 
-      supabase
-        .from('order_items')
-        .insert(orderItemsPayload)
-        .then(({ error }) => {
-          if (error) console.error("Supabase order_items insert error:", error);
-        });
+        await supabase
+          .from('order_items')
+          .insert(orderItemsPayload);
+      } catch (err) {}
     }
 
     return newOrder;
@@ -715,11 +733,12 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
   const handlePlaceOrder = () => {
     if (!activeTable) return alert("No table detected! Please scan a table QR code.");
     if (cart.length === 0) return;
-    const newOrd = store.createOrder({ tableNumber: activeTable, items: cart, specialNote });
-    store.clearCart();
-    setIsCartOpen(false);
-    setSpecialNote("");
-    setActiveOrder(newOrd);
+    store.createOrder({ tableNumber: activeTable, items: cart, specialNote }).then(newOrd => {
+      store.clearCart();
+      setIsCartOpen(false);
+      setSpecialNote("");
+      setActiveOrder(newOrd);
+    });
   };
 
   return (
@@ -973,12 +992,16 @@ function WaiterDashboard() {
                     <span className="text-[10px] text-stone-500">{formatPrice(ord.totalAmount)}</span>
                   </div>
                   <div className="mt-2 text-xs space-y-1 border-t pt-2">
-                    {ord.items.map((i, idx) => (
-                      <div key={idx} className="flex justify-between">
-                        <span>{i.quantity}x {i.name}</span>
-                        <span>{formatPrice(i.price * i.quantity)}</span>
-                      </div>
-                    ))}
+                    {ord.items && ord.items.length > 0 ? (
+                      ord.items.map((i, idx) => (
+                        <div key={idx} className="flex justify-between">
+                          <span>{i.quantity}x {i.name}</span>
+                          <span>{formatPrice(i.price * i.quantity)}</span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-[10px] text-stone-400 italic">Itemized order details sync...</p>
+                    )}
                   </div>
                 </div>
                 <div className="flex gap-2">
@@ -1053,12 +1076,16 @@ function KitchenDisplay() {
                   <span className="text-xs uppercase bg-amber-500/20 text-amber-400 font-bold px-2.5 py-1 rounded-full">{ord.status}</span>
                 </div>
                 <div className="py-3 space-y-2">
-                  {ord.items.map((i, idx) => (
-                    <div key={idx} className="bg-stone-800 p-2 rounded-xl text-xs flex justify-between font-bold">
-                      <span>{i.quantity}x {i.name}</span>
-                      <span className="text-stone-400">{formatPrice(i.price * i.quantity)}</span>
-                    </div>
-                  ))}
+                  {ord.items && ord.items.length > 0 ? (
+                    ord.items.map((i, idx) => (
+                      <div key={idx} className="bg-stone-800 p-2 rounded-xl text-xs flex justify-between font-bold">
+                        <span>{i.quantity}x {i.name}</span>
+                        <span className="text-stone-400">{formatPrice(i.price * i.quantity)}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-xs text-amber-400/80 italic p-2 bg-stone-800 rounded-xl">Loading ordered items...</p>
+                  )}
                 </div>
                 {ord.specialNote && (
                   <p className="text-xs bg-amber-500/10 text-amber-300 p-2 rounded-xl border border-amber-500/20">
