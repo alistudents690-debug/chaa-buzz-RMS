@@ -1,5 +1,6 @@
 -- ====================================================================
 -- CHAA BUZZ CAFE - SUPABASE DATABASE SCHEMA & REALTIME CONFIGURATION
+-- Fully Idempotent Script (Safe to re-run multiple times)
 -- ====================================================================
 
 -- 1. Create Categories Table
@@ -59,11 +60,31 @@ CREATE TABLE IF NOT EXISTS public.order_items (
 );
 
 -- ====================================================================
--- REALTIME SUBSCRIPTIONS ENABLING
+-- REALTIME SUBSCRIPTIONS (SAFE IF ALREADY EXISTS)
 -- ====================================================================
-ALTER PUBLICATION supabase_realtime ADD TABLE public.orders;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.menu_items;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.cafe_tables;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables 
+        WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'orders'
+    ) THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.orders;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables 
+        WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'menu_items'
+    ) THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.menu_items;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables 
+        WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'cafe_tables'
+    ) THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.cafe_tables;
+    END IF;
+END $$;
 
 -- ====================================================================
 -- ROW LEVEL SECURITY (RLS) POLICIES
@@ -74,17 +95,30 @@ ALTER TABLE public.cafe_tables ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.order_items ENABLE ROW LEVEL SECURITY;
 
--- Allow Public Read Access for Menu, Categories, and Tables
+-- Safely recreate policies
+DROP POLICY IF EXISTS "Public Read Categories" ON public.categories;
 CREATE POLICY "Public Read Categories" ON public.categories FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Public Read Menu Items" ON public.menu_items;
 CREATE POLICY "Public Read Menu Items" ON public.menu_items FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Public Read Cafe Tables" ON public.cafe_tables;
 CREATE POLICY "Public Read Cafe Tables" ON public.cafe_tables FOR SELECT USING (true);
 
--- Allow Public Order Creation (Customers scan QR and place order without auth)
+DROP POLICY IF EXISTS "Public Create Orders" ON public.orders;
 CREATE POLICY "Public Create Orders" ON public.orders FOR INSERT WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Public Read Orders" ON public.orders;
 CREATE POLICY "Public Read Orders" ON public.orders FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Public Create Order Items" ON public.order_items;
 CREATE POLICY "Public Create Order Items" ON public.order_items FOR INSERT WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Public Read Order Items" ON public.order_items;
 CREATE POLICY "Public Read Order Items" ON public.order_items FOR SELECT USING (true);
 
--- Allow Order Updates for Waiter / Kitchen / Admin
+DROP POLICY IF EXISTS "Staff Update Orders" ON public.orders;
 CREATE POLICY "Staff Update Orders" ON public.orders FOR UPDATE USING (true);
+
+DROP POLICY IF EXISTS "Admin Modify Menu" ON public.menu_items;
 CREATE POLICY "Admin Modify Menu" ON public.menu_items FOR ALL USING (true);
