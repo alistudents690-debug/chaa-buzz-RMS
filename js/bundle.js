@@ -1,4 +1,4 @@
-// Chaa Buzz Cafe - Full Application Bundle with Unique Order ID Generation & Multi-Order Table Support
+// Chaa Buzz Cafe - Full Application Bundle with Direct Supabase DB Integration & Realtime Sync
 
 // ====================================================================
 // 1. DATASET & CONFIGURATION
@@ -18,6 +18,13 @@ const PASSCODE_ROLES = {
   "1210": "kitchen",
   "9100": "waiter"
 };
+
+// --- SUPABASE CLIENT INITIALIZATION ---
+const SUPABASE_URL = "https://umnbgjhhcvmkcdibmsdr.supabase.co";
+const SUPABASE_KEY = "sb_publishable_CdBFJUtArtuAyveQue5aQQ_UnkXlRkt";
+const supabase = (window.supabase && window.supabase.createClient) 
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) 
+  : null;
 
 const PRESET_IMAGES = [
   { label: "🍵 Matka Chaa", url: "https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=600&q=80" },
@@ -165,7 +172,7 @@ const INITIAL_TABLES = Array.from({ length: 16 }, (_, i) => ({
 }));
 
 // ====================================================================
-// 2. REALTIME CLOUD SYNC ENGINE WITH UNIQUE ORDER ID DEDUPLICATION
+// 2. REALTIME CLOUD SYNC & DUAL SUPABASE DB ENGINE
 // ====================================================================
 const STORAGE_KEYS = {
   MENU: 'chaa_buzz_menu',
@@ -217,7 +224,32 @@ class Store extends EventTarget {
   }
 
   initCloudSyncEngine() {
-    // SSE Realtime Event Stream
+    // 1. Supabase Initial Load & Realtime Channel Subscription
+    if (supabase) {
+      this.fetchOrdersFromSupabase();
+
+      try {
+        supabase
+          .channel('public:orders')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload) => {
+            if (payload.eventType === 'INSERT') {
+              this.fetchSingleOrderFromSupabase(payload.new.id);
+            } else if (payload.eventType === 'UPDATE') {
+              const orders = this.getOrders();
+              const idx = orders.findIndex(o => o.id === payload.new.id);
+              if (idx >= 0) {
+                orders[idx].status = payload.new.status;
+                localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+                if (payload.new.status === 'ready') this.playBellSound('ready');
+                this.notify('order-updated', orders[idx]);
+              }
+            }
+          })
+          .subscribe();
+      } catch (err) {}
+    }
+
+    // 2. HTTP Event Relay Stream & Backup Polling
     try {
       if (typeof EventSource !== 'undefined') {
         const es = new EventSource(`${NTFY_RELAY}/json`);
@@ -233,7 +265,6 @@ class Store extends EventTarget {
       }
     } catch (e) {}
 
-    // Cloud polling loop every 1.5s
     const runCloudSync = async () => {
       try {
         const res = await fetch(`${NTFY_RELAY}/json?poll=1`);
@@ -258,12 +289,96 @@ class Store extends EventTarget {
     setInterval(runCloudSync, 1500);
   }
 
+  async fetchOrdersFromSupabase() {
+    if (!supabase) return;
+    try {
+      const { data: dbOrders, error } = await supabase
+        .from('orders')
+        .select(`
+          id,
+          table_number,
+          total_amount,
+          special_note,
+          status,
+          created_at,
+          order_items (
+            name,
+            price,
+            quantity,
+            note
+          )
+        `)
+        .order('created_at', { ascending: false });
+
+      if (!error && dbOrders) {
+        const mapped = dbOrders.map(o => ({
+          id: o.id,
+          tableNumber: o.table_number,
+          totalAmount: Number(o.total_amount),
+          specialNote: o.special_note || '',
+          status: o.status,
+          createdAt: o.created_at,
+          items: (o.order_items || []).map(i => ({
+            name: i.name,
+            price: Number(i.price),
+            quantity: i.quantity,
+            note: i.note || ''
+          }))
+        }));
+
+        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(mapped));
+        this.notify('orders-loaded');
+      }
+    } catch (err) {}
+  }
+
+  async fetchSingleOrderFromSupabase(orderId) {
+    if (!supabase) return;
+    try {
+      const { data: o, error } = await supabase
+        .from('orders')
+        .select(`
+          id,
+          table_number,
+          total_amount,
+          special_note,
+          status,
+          created_at,
+          order_items (
+            name,
+            price,
+            quantity,
+            note
+          )
+        `)
+        .eq('id', orderId)
+        .single();
+
+      if (!error && o) {
+        const mappedOrder = {
+          id: o.id,
+          tableNumber: o.table_number,
+          totalAmount: Number(o.total_amount),
+          specialNote: o.special_note || '',
+          status: o.status,
+          createdAt: o.created_at,
+          items: (o.order_items || []).map(i => ({
+            name: i.name,
+            price: Number(i.price),
+            quantity: i.quantity,
+            note: i.note || ''
+          }))
+        };
+        this.applyIncomingSync({ type: 'order-created', data: mappedOrder });
+      }
+    } catch (err) {}
+  }
+
   applyIncomingSync(payload) {
     if (!payload || !payload.type) return;
 
     if (payload.type === 'order-created') {
       const orders = this.getOrders();
-      // Strictly deduplicate by unique order ID (NOT table number)
       const exists = orders.some(o => o.id === payload.data.id);
       if (!exists) {
         orders.unshift(payload.data);
@@ -358,10 +473,9 @@ class Store extends EventTarget {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.ORDERS)) || []; } catch { return []; }
   }
 
-  // --- SAFE FIX: Generate 100% Unique Timestamp + Random Order ID ---
+  // --- Create Order (Direct Supabase DB Insert + Relay Sync) ---
   createOrder({ tableNumber, items, specialNote = "" }) {
     const orders = this.getOrders();
-    // Unique ID generation using timestamp + random digits (Guarantees zero collisions)
     const uniqueIdSuffix = Date.now().toString().slice(-5) + Math.floor(10 + Math.random() * 90);
     const newOrderId = `ORD-${uniqueIdSuffix}`;
     const totalAmount = items.reduce((sum, i) => sum + (i.price * i.quantity), 0);
@@ -376,13 +490,44 @@ class Store extends EventTarget {
       createdAt: new Date().toISOString()
     };
     
+    // 1. Local & Relay Update
     orders.unshift(newOrder);
     localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
     this.playBellSound('new');
     this.notify('order-created', newOrder);
-
-    // Broadcast across all devices (Mobile QR scan -> Chef KDS / Waiter Panel)
     this.publishCrossDevice('order-created', newOrder);
+
+    // 2. Direct Supabase DB Persist
+    if (supabase) {
+      supabase
+        .from('orders')
+        .insert([{
+          id: newOrderId,
+          table_number: Number(tableNumber),
+          total_amount: totalAmount,
+          special_note: specialNote || '',
+          status: 'pending'
+        }])
+        .then(({ error }) => {
+          if (error) console.error("Supabase order insert error:", error);
+        });
+
+      const orderItemsPayload = items.map(item => ({
+        order_id: newOrderId,
+        item_id: item.id || null,
+        name: item.name,
+        price: item.price,
+        quantity: item.quantity,
+        note: item.note || ''
+      }));
+
+      supabase
+        .from('order_items')
+        .insert(orderItemsPayload)
+        .then(({ error }) => {
+          if (error) console.error("Supabase order_items insert error:", error);
+        });
+    }
 
     return newOrder;
   }
@@ -395,9 +540,18 @@ class Store extends EventTarget {
       localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
       if (status === 'ready') this.playBellSound('ready');
       this.notify('order-updated', order);
-
-      // Broadcast status update for THIS specific order ID
       this.publishCrossDevice('order-updated', order);
+
+      // Direct Supabase DB Update
+      if (supabase) {
+        supabase
+          .from('orders')
+          .update({ status, updated_at: new Date().toISOString() })
+          .eq('id', orderId)
+          .then(({ error }) => {
+            if (error) console.error("Supabase status update error:", error);
+          });
+      }
     }
   }
 
@@ -410,9 +564,19 @@ class Store extends EventTarget {
     });
     localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
     this.notify('table-cleared');
-
-    // Broadcast table clear across all devices
     this.publishCrossDevice('table-cleared', { tableNumber });
+
+    // Direct Supabase DB Update
+    if (supabase) {
+      supabase
+        .from('orders')
+        .update({ status: 'completed', updated_at: new Date().toISOString() })
+        .eq('table_number', Number(tableNumber))
+        .neq('status', 'completed')
+        .then(({ error }) => {
+          if (error) console.error("Supabase table clear error:", error);
+        });
+    }
   }
 
   getCart() {
@@ -527,7 +691,6 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
       setCart(store.getCart());
       if (activeTable) {
         const orders = store.getOrders();
-        // Get the latest active order for this table
         const current = orders.find(o => Number(o.tableNumber) === Number(activeTable) && o.status !== 'completed');
         setActiveOrder(current || null);
       }
@@ -759,14 +922,14 @@ function WaiterDashboard() {
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
             <h1 className="text-xl font-bold">Waiter Service Dashboard</h1>
           </div>
-          <p className="text-xs text-stone-500">Floor Overview & Active Table Orders (Live Cloud Sync)</p>
+          <p className="text-xs text-stone-500">Connected to Supabase DB & Realtime Stream</p>
         </div>
 
         <button
-          onClick={() => store.pollCloudEvents()}
+          onClick={() => store.fetchOrdersFromSupabase()}
           className="bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-bold px-3 py-2 rounded-xl flex items-center gap-1.5"
         >
-          <span>🔄 Sync Orders Now</span>
+          <span>🔄 Sync Supabase DB</span>
         </button>
       </div>
 
@@ -858,11 +1021,11 @@ function KitchenDisplay() {
             <span className="w-3 h-3 rounded-full bg-emerald-400 animate-pulse" />
             <h1 className="text-xl font-bold text-amber-400">Kitchen Display System (KDS)</h1>
           </div>
-          <p className="text-xs text-stone-400 mt-0.5">Every order appears as a separate card with unique Order ID</p>
+          <p className="text-xs text-stone-400 mt-0.5">Direct Supabase Realtime Postgres Stream</p>
         </div>
         <div className="flex items-center gap-3">
           <button
-            onClick={() => store.pollCloudEvents()}
+            onClick={() => store.fetchOrdersFromSupabase()}
             className="bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1.5"
           >
             <span>🔄 Force Sync</span>
