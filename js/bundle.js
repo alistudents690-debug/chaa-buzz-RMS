@@ -1,4 +1,4 @@
-// Chaa Buzz Cafe - Full Application Bundle with Guaranteed Supabase Order Items & Realtime Sync
+// Chaa Buzz Cafe - Full Application Bundle with Strict Role-Based Access Control (RBAC)
 
 // ====================================================================
 // 1. DATASET & CONFIGURATION
@@ -516,7 +516,7 @@ class Store extends EventTarget {
     this.notify('order-created', newOrder);
     this.publishCrossDevice('order-created', newOrder);
 
-    // 2. Direct Supabase DB Persist (Guaranteed order_items insert without Foreign Key failure)
+    // 2. Direct Supabase DB Persist (Guaranteed order_items insert)
     if (supabase) {
       try {
         await supabase
@@ -531,7 +531,7 @@ class Store extends EventTarget {
 
         const orderItemsPayload = items.map(item => ({
           order_id: newOrderId,
-          item_id: null, // Null item_id prevents foreign key constraint failure on unseeded DBs
+          item_id: null,
           name: item.name,
           price: item.price,
           quantity: item.quantity,
@@ -1120,13 +1120,18 @@ function KitchenDisplay() {
 function AdminPanel({ onOpenPrintQr }) {
   const [menuItems, setMenuItems] = useState(store.getMenuItems());
   const [categories] = useState(store.getCategories());
+  const [orders, setOrders] = useState(store.getOrders());
   const [editingItem, setEditingItem] = useState(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [selectedImageUrl, setSelectedImageUrl] = useState("");
 
   useEffect(() => {
-    const update = () => setMenuItems(store.getMenuItems());
+    const update = () => {
+      setMenuItems(store.getMenuItems());
+      setOrders(store.getOrders());
+    };
     store.addEventListener('state-changed', update);
+    update();
     return () => store.removeEventListener('state-changed', update);
   }, []);
 
@@ -1185,6 +1190,66 @@ function AdminPanel({ onOpenPrintQr }) {
         </div>
       </div>
 
+      {/* Live Orders Overview (Read-Only View for Admin) */}
+      <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-200 space-y-4">
+        <div className="flex justify-between items-center">
+          <h2 className="text-xs font-black uppercase tracking-wider text-stone-500">Live Orders Overview (Read-Only View)</h2>
+          <span className="text-[10px] bg-stone-100 px-2.5 py-1 rounded-full font-bold text-stone-600">{orders.length} Total Orders</span>
+        </div>
+
+        {orders.length === 0 ? (
+          <p className="text-stone-400 text-xs py-4 text-center">No active orders recorded.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-stone-200 text-stone-400 font-bold uppercase">
+                  <th className="py-3 px-2">Order ID & Table</th>
+                  <th className="py-3 px-2">Items Ordered</th>
+                  <th className="py-3 px-2">Special Note</th>
+                  <th className="py-3 px-2">Total Amount</th>
+                  <th className="py-3 px-2 text-right">Status (Read-Only)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-stone-100">
+                {orders.map(ord => (
+                  <tr key={ord.id} className="hover:bg-stone-50">
+                    <td className="py-3 px-2 font-bold text-stone-900">
+                      <div>Table {ord.tableNumber}</div>
+                      <div className="text-[10px] text-stone-400 font-mono">#{ord.id}</div>
+                    </td>
+                    <td className="py-3 px-2">
+                      {ord.items && ord.items.length > 0 ? (
+                        ord.items.map((i, idx) => (
+                          <div key={idx} className="text-stone-700 font-semibold">
+                            {i.quantity}x {i.name}
+                          </div>
+                        ))
+                      ) : (
+                        <span className="text-stone-400 italic">No items listed</span>
+                      )}
+                    </td>
+                    <td className="py-3 px-2 text-stone-500 italic">{ord.specialNote || 'None'}</td>
+                    <td className="py-3 px-2 font-black text-stone-900">{formatPrice(ord.totalAmount)}</td>
+                    <td className="py-3 px-2 text-right">
+                      <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase ${
+                        ord.status === 'ready' ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' :
+                        ord.status === 'preparing' ? 'bg-amber-100 text-amber-800 border border-amber-300' :
+                        ord.status === 'completed' ? 'bg-stone-200 text-stone-700 border border-stone-300' :
+                        'bg-stone-100 text-stone-600 border border-stone-300'
+                      }`}>
+                        {ord.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Menu Management Section */}
       <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-200 space-y-4">
         <div className="flex justify-between items-center">
           <h2 className="text-xs font-black uppercase tracking-wider text-stone-500">Café Food Menu ({menuItems.length} Items)</h2>
@@ -1450,9 +1515,8 @@ function StaffAuthModal({ onClose, onAuthenticated }) {
   );
 }
 
-// --- Main Root App Component ---
+// --- Main Root App Component with Strict Role-Based Route Guards ---
 function App() {
-  const [activeRole, setActiveRole] = useState("customer");
   const [authenticatedStaffRole, setAuthenticatedStaffRole] = useState(null);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [activeTable, setActiveTable] = useState(null);
@@ -1466,66 +1530,48 @@ function App() {
 
   const handleStaffAuthenticated = (role) => {
     setAuthenticatedStaffRole(role);
-    setActiveRole(role);
     setIsAuthOpen(false);
   };
 
   const handleLogoutStaff = () => {
     setAuthenticatedStaffRole(null);
-    setActiveRole("customer");
   };
+
+  // STRICT ROUTE GUARD: Effective role is governed strictly by passcode authentication
+  const currentRole = authenticatedStaffRole || "customer";
 
   return (
     <div className="min-h-screen bg-stone-100 flex flex-col font-sans">
       {authenticatedStaffRole ? (
-        <header className="bg-stone-950 text-stone-300 border-b border-stone-800 sticky top-0 z-50 p-2">
+        <header className="bg-stone-950 text-stone-300 border-b border-stone-800 sticky top-0 z-50 p-2.5">
           <div className="max-w-7xl mx-auto flex items-center justify-between">
             <div className="flex items-center gap-2 font-bold text-white text-xs">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>Staff Mode: <strong className="uppercase text-amber-400">{authenticatedStaffRole}</strong></span>
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Staff Portal: <strong className="uppercase text-amber-400 tracking-wider font-extrabold">{authenticatedStaffRole === 'kitchen' ? 'CHEF (KITCHEN KDS)' : authenticatedStaffRole}</strong></span>
             </div>
 
-            <div className="flex gap-1 bg-stone-900 p-1 rounded-xl border border-stone-800 text-xs">
-              <button
-                onClick={() => setActiveRole('waiter')}
-                className={`px-3 py-1 rounded-lg font-bold capitalize ${activeRole === 'waiter' ? 'bg-amber-500 text-stone-950' : 'text-stone-400'}`}
-              >
-                Waiter
-              </button>
-              <button
-                onClick={() => setActiveRole('kitchen')}
-                className={`px-3 py-1 rounded-lg font-bold capitalize ${activeRole === 'kitchen' ? 'bg-amber-500 text-stone-950' : 'text-stone-400'}`}
-              >
-                Kitchen
-              </button>
-              <button
-                onClick={() => setActiveRole('admin')}
-                className={`px-3 py-1 rounded-lg font-bold capitalize ${activeRole === 'admin' ? 'bg-amber-500 text-stone-950' : 'text-stone-400'}`}
-              >
-                Admin
-              </button>
-              <button
-                onClick={handleLogoutStaff}
-                className="px-3 py-1 rounded-lg font-bold text-rose-400 hover:bg-rose-500/20"
-              >
-                🔒 Lock Staff Mode
-              </button>
-            </div>
+            <button
+              onClick={handleLogoutStaff}
+              className="px-3.5 py-1.5 rounded-xl font-bold text-xs bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 border border-rose-500/30 flex items-center gap-1.5 transition"
+            >
+              <span>🔒</span>
+              <span>Lock & Exit Staff Mode</span>
+            </button>
           </div>
         </header>
       ) : null}
 
       <main className="flex-1">
-        {activeRole === "customer" && (
+        {currentRole === "customer" && (
           <CustomerMenu
             activeTable={activeTable}
             onSelectTable={t => setActiveTable(t)}
             onOpenStaffAuth={() => setIsAuthOpen(true)}
           />
         )}
-        {activeRole === "waiter" && <WaiterDashboard />}
-        {activeRole === "kitchen" && <KitchenDisplay />}
-        {activeRole === "admin" && <AdminPanel onOpenPrintQr={() => setIsPrintQrOpen(true)} />}
+        {currentRole === "waiter" && <WaiterDashboard />}
+        {currentRole === "kitchen" && <KitchenDisplay />}
+        {currentRole === "admin" && <AdminPanel onOpenPrintQr={() => setIsPrintQrOpen(true)} />}
       </main>
 
       {isAuthOpen && (
@@ -1535,7 +1581,7 @@ function App() {
         />
       )}
 
-      {isPrintQrOpen && (
+      {isPrintQrOpen && currentRole === "admin" && (
         <QrPrintModal onClose={() => setIsPrintQrOpen(false)} />
       )}
     </div>
