@@ -1,13 +1,14 @@
-// Chaa Buzz Cafe - Full Application Bundle with Strict Role-Based Access Control (RBAC)
+// Chaa Buzz Cafe - Full Application Bundle with Official ChaaBuzz Cafe Menu & High-Res Imagery
 
 // ====================================================================
-// 1. DATASET & CONFIGURATION
+// 1. DATASET & CONFIGURATION (FROM OFFICIAL CHAABUZZ CAFE MENU)
 // ====================================================================
 const CAFE_INFO = {
-  name: "Chaa Buzz Cafe",
-  tagline: "Artisan Teas, Specialty Coffee & Gourmet Bites",
+  name: "ChaaBuzz Cafe",
+  tagline: "Specialty Tea, Fried Buns, Gourmet Burgers & Refreshments",
   address: "House 14, Road 7, Block C, Banani, Dhaka",
-  phone: "+880 1712-345678",
+  phone: "+880 1725-514927",
+  social: "@ChaaBuzz",
   currency: "৳"
 };
 
@@ -27,137 +28,245 @@ const supabase = (window.supabase && window.supabase.createClient)
   : null;
 
 const PRESET_IMAGES = [
-  { label: "🍵 Matka Chaa", url: "https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=600&q=80" },
-  { label: "☕ Cappuccino", url: "https://images.unsplash.com/photo-1534778101976-62847782c213?auto=format&fit=crop&w=600&q=80" },
-  { label: "🧊 Iced Latte", url: "https://images.unsplash.com/photo-1517701604599-bb29b565090c?auto=format&fit=crop&w=600&q=80" },
+  { label: "☕ Dud Chaa", url: "https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=600&q=80" },
+  { label: "🍵 Malai Chaa", url: "https://images.unsplash.com/photo-1544787219-7f47ccb76574?auto=format&fit=crop&w=600&q=80" },
+  { label: "🍞 Fried Bun", url: "https://images.unsplash.com/photo-1589301760014-d929f39729f6?auto=format&fit=crop&w=600&q=80" },
   { label: "🍔 Chicken Burger", url: "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?auto=format&fit=crop&w=600&q=80" },
-  { label: "🍔 Smash Burger", url: "https://images.unsplash.com/photo-1586190848861-99aa4a171e90?auto=format&fit=crop&w=600&q=80" },
-  { label: "🍕 Truffle Pizza", url: "https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=600&q=80" },
-  { label: "🍝 Alfredo Pasta", url: "https://images.unsplash.com/photo-1645112411341-6c4fd023714a?auto=format&fit=crop&w=600&q=80" },
-  { label: "🍰 Lava Cake", url: "https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&w=600&q=80" },
-  { label: "🍹 Mojito", url: "https://images.unsplash.com/photo-1513558161293-cdaf765ed2fd?auto=format&fit=crop&w=600&q=80" },
-  { label: "🍟 Loaded Fries", url: "https://images.unsplash.com/photo-1576107232684-1279f390859f?auto=format&fit=crop&w=600&q=80" }
+  { label: "🍟 French Fry", url: "https://images.unsplash.com/photo-1576107232684-1279f390859f?auto=format&fit=crop&w=600&q=80" },
+  { label: "🌯 Porota Burger", url: "https://images.unsplash.com/photo-1627308595229-7830a5c91f9f?auto=format&fit=crop&w=600&q=80" },
+  { label: "📦 Meatbox", url: "https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=600&q=80" },
+  { label: "🥤 Lacci", url: "https://images.unsplash.com/photo-1553530666-ba11a7da3888?auto=format&fit=crop&w=600&q=80" },
+  { label: "🍌 Banana Shake", url: "https://images.unsplash.com/photo-1572490122747-3968b75cc699?auto=format&fit=crop&w=600&q=80" },
+  { label: "🍨 Doi Chira", url: "https://images.unsplash.com/photo-1511690656952-34342bb7c2f2?auto=format&fit=crop&w=600&q=80" },
+  { label: "🍰 Dream Cake", url: "https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&w=600&q=80" }
 ];
 
 const INITIAL_CATEGORIES = [
   { id: "all", name: "All Items" },
-  { id: "tea-chaa", name: "Chaa & Teas" },
-  { id: "coffee", name: "Specialty Coffee" },
-  { id: "burgers", name: "Gourmet Burgers" },
-  { id: "pizza-pasta", name: "Pizza & Pasta" },
-  { id: "desserts", name: "Desserts & Bakery" },
-  { id: "cold-drinks", name: "Cold Drinks & Shakes" },
-  { id: "snacks", name: "Crispy Snacks" }
+  { id: "chaa", name: "☕ Chaa" },
+  { id: "fried-bun", name: "🍞 Fried Bun" },
+  { id: "burger", name: "🍔 Burger & Snacks" },
+  { id: "juice", name: "🥤 Juice & Shakes" },
+  { id: "others", name: "🍰 Others & Desserts" }
 ];
 
 const INITIAL_MENU_ITEMS = [
+  // --- CHAA ---
   {
-    id: "m1",
-    name: "Special Matka Milk Chaa",
-    category: "tea-chaa",
-    price: 60,
-    description: "Traditional slow-brewed spiced milk tea served in an authentic earthen clay pot (matka). Rich, creamy, and fragrant.",
+    id: "c1",
+    name: "Dud Chaa",
+    category: "chaa",
+    price: 20,
+    description: "Classic slow-brewed milk tea made with fresh milk and fragrant tea leaves.",
     image: "https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=600&q=80",
-    isPopular: true,
-    inStock: true
-  },
-  {
-    id: "m2",
-    name: "Zafrani Elaichi Tea",
-    category: "tea-chaa",
-    price: 80,
-    description: "Premium Assam tea leaves infused with saffron strands and freshly crushed green cardamom.",
-    image: "https://images.unsplash.com/photo-1597481499750-3e6b22637e12?auto=format&fit=crop&w=600&q=80",
     isPopular: false,
     inStock: true
   },
   {
-    id: "m4",
-    name: "Hazelnut Cappuccino",
-    category: "coffee",
-    price: 240,
-    description: "Double shot espresso with silky microfoam milk and roasted hazelnut syrup, dusted with dark cocoa powder.",
-    image: "https://images.unsplash.com/photo-1534778101976-62847782c213?auto=format&fit=crop&w=600&q=80",
+    id: "c2",
+    name: "Special Powder Dud chaa",
+    category: "chaa",
+    price: 30,
+    description: "Rich and aromatic milk tea prepared with premium full-cream milk powder.",
+    image: "https://images.unsplash.com/photo-1597481499750-3e6b22637e12?auto=format&fit=crop&w=600&q=80",
     isPopular: true,
     inStock: true
   },
   {
-    id: "m5",
-    name: "Spanish Iced Latte",
-    category: "coffee",
-    price: 280,
-    description: "Rich espresso poured over sweet condensed milk, fresh whole milk, and clear ice spheres.",
-    image: "https://images.unsplash.com/photo-1517701604599-bb29b565090c?auto=format&fit=crop&w=600&q=80",
+    id: "c3",
+    name: "Malai Chaa",
+    category: "chaa",
+    price: 40,
+    description: "Creamy milk tea topped with a rich layer of clotted milk cream (malai).",
+    image: "https://images.unsplash.com/photo-1544787219-7f47ccb76574?auto=format&fit=crop&w=600&q=80",
     isPopular: true,
     inStock: true
   },
   {
-    id: "m7",
-    name: "Smokey Buzz Chicken Burger",
-    category: "burgers",
-    price: 320,
-    description: "Crispy double-fried chicken breast, smoked cheddar cheese, honey mustard coleslaw, and house buzz sauce in a toasted brioche bun.",
+    id: "c4",
+    name: "Malai Chaa Special",
+    category: "chaa",
+    price: 60,
+    description: "Extra thick spiced malai tea served with double cream in a traditional earthen pot.",
+    image: "https://images.unsplash.com/photo-1561336313-0bd5e0b27ec8?auto=format&fit=crop&w=600&q=80",
+    isPopular: true,
+    inStock: true
+  },
+  {
+    id: "c5",
+    name: "Shahi Malai Chaa",
+    category: "chaa",
+    price: 99,
+    description: "Royal malai tea infused with saffron strands, crushed almonds, pistachios & cardamom.",
+    image: "https://images.unsplash.com/photo-1571934811356-5cc531766b34?auto=format&fit=crop&w=600&q=80",
+    isPopular: true,
+    inStock: true
+  },
+  {
+    id: "c6",
+    name: "Bread Malai",
+    category: "chaa",
+    price: 80,
+    description: "Warm butter-toasted bread slice soaked in thick sweet cardamom malai cream.",
+    image: "https://images.unsplash.com/photo-1525351484163-7529414344d8?auto=format&fit=crop&w=600&q=80",
+    isPopular: false,
+    inStock: true
+  },
+
+  // --- FRIED BUN ---
+  {
+    id: "fb1",
+    name: "Pura ruti",
+    category: "fried-bun",
+    price: 20,
+    description: "Traditional crisp toasted butter roti bun cooked to golden perfection.",
+    image: "https://images.unsplash.com/photo-1589301760014-d929f39729f6?auto=format&fit=crop&w=600&q=80",
+    isPopular: false,
+    inStock: true
+  },
+  {
+    id: "fb2",
+    name: "Pura ruti special",
+    category: "fried-bun",
+    price: 25,
+    description: "Special butter-fried toasted roti bun with a caramelized sugar crust.",
+    image: "https://images.unsplash.com/photo-1509440159596-0249088772ff?auto=format&fit=crop&w=600&q=80",
+    isPopular: true,
+    inStock: true
+  },
+  {
+    id: "fb3",
+    name: "shahi Pura ruti",
+    category: "fried-bun",
+    price: 35,
+    description: "Royal toasted bun glazed with butter, condensed milk, and sweet aromatic spices.",
+    image: "https://images.unsplash.com/photo-1608198093002-ad4e005484ec?auto=format&fit=crop&w=600&q=80",
+    isPopular: true,
+    inStock: true
+  },
+  {
+    id: "fb4",
+    name: "Puran Dhakar Bakarkhani",
+    category: "fried-bun",
+    price: 20,
+    description: "Authentic Old Dhaka crisp layered sweet biscuit bread.",
+    image: "https://images.unsplash.com/photo-1509440159596-0249088772ff?auto=format&fit=crop&w=600&q=80",
+    isPopular: false,
+    inStock: true
+  },
+
+  // --- BURGER & SNACKS ---
+  {
+    id: "b1",
+    name: "Mini Burger",
+    category: "burger",
+    price: 50,
+    description: "Juicy mini chicken patty slider with fresh lettuce, mayo, and cheddar cheese.",
+    image: "https://images.unsplash.com/photo-1550547660-d9450f859349?auto=format&fit=crop&w=600&q=80",
+    isPopular: false,
+    inStock: true
+  },
+  {
+    id: "b2",
+    name: "French Fry",
+    category: "burger",
+    price: 50,
+    description: "Crispy golden salted french fries served with spicy mayo dip.",
+    image: "https://images.unsplash.com/photo-1576107232684-1279f390859f?auto=format&fit=crop&w=600&q=80",
+    isPopular: true,
+    inStock: true
+  },
+  {
+    id: "b3",
+    name: "Chicken Burger",
+    category: "burger",
+    price: 90,
+    description: "Crispy double-fried chicken breast patty with special sauce, lettuce, and bun.",
     image: "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?auto=format&fit=crop&w=600&q=80",
     isPopular: true,
     inStock: true
   },
   {
-    id: "m8",
-    name: "Classic Cheese Smash Beef Burger",
-    category: "burgers",
-    price: 380,
-    description: "100% Angus beef patty smashed crispy on the grill, melted American cheese, caramelized onions, pickles, and burger relish.",
-    image: "https://images.unsplash.com/photo-1586190848861-99aa4a171e90?auto=format&fit=crop&w=600&q=80",
+    id: "b4",
+    name: "Porota Burger",
+    category: "burger",
+    price: 170,
+    description: "Flaky crispy paratha wrap layered with double spiced chicken patties and melted cheese.",
+    image: "https://images.unsplash.com/photo-1627308595229-7830a5c91f9f?auto=format&fit=crop&w=600&q=80",
     isPopular: true,
     inStock: true
   },
   {
-    id: "m9",
-    name: "Truffle Mushroom Pizza (10\")",
-    category: "pizza-pasta",
-    price: 550,
-    description: "Hand-tossed sourdough pizza topped with roasted wild mushrooms, mozzarella, garlic butter, and black truffle oil spray.",
-    image: "https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=600&q=80",
+    id: "b5",
+    name: "Meatbox",
+    category: "burger",
+    price: 120,
+    description: "Loaded box of crispy fries, fried chicken chunks, sliced sausage, and melted cheese sauce.",
+    image: "https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=600&q=80",
+    isPopular: true,
+    inStock: true
+  },
+
+  // --- JUICE & SHAKES ---
+  {
+    id: "j1",
+    name: "Lacci",
+    category: "juice",
+    price: 70,
+    description: "Traditional chilled sweet yogurt lassi blended with ice and rose water.",
+    image: "https://images.unsplash.com/photo-1553530666-ba11a7da3888?auto=format&fit=crop&w=600&q=80",
+    isPopular: true,
+    inStock: true
+  },
+  {
+    id: "j2",
+    name: "Banana shake",
+    category: "juice",
+    price: 80,
+    description: "Creamy fresh banana milkshake topped with crushed nuts.",
+    image: "https://images.unsplash.com/photo-1572490122747-3968b75cc699?auto=format&fit=crop&w=600&q=80",
+    isPopular: false,
+    inStock: true
+  },
+
+  // --- OTHERS ---
+  {
+    id: "o1",
+    name: "Doi Chira",
+    category: "others",
+    price: 90,
+    description: "Traditional sweet yogurt blended with flattened rice (chira), ripe banana slices, and honey.",
+    image: "https://images.unsplash.com/photo-1511690656952-34342bb7c2f2?auto=format&fit=crop&w=600&q=80",
+    isPopular: true,
+    inStock: true
+  },
+  {
+    id: "o2",
+    name: "Doi Chira Special",
+    category: "others",
+    price: 120,
+    description: "Special doi chira layered with sweet curd, seasonal fruits, cashews, raisins, and pure honey.",
+    image: "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=600&q=80",
+    isPopular: true,
+    inStock: true
+  },
+  {
+    id: "o3",
+    name: "American Mixed Chips",
+    category: "others",
+    price: 90,
+    description: "Assorted bowl of crunchy potato chips and seasoned corn crisps.",
+    image: "https://images.unsplash.com/photo-1566478989037-eec170784d0b?auto=format&fit=crop&w=600&q=80",
     isPopular: false,
     inStock: true
   },
   {
-    id: "m10",
-    name: "Creamy Chicken Alfredo Pasta",
-    category: "pizza-pasta",
-    price: 420,
-    description: "Fettuccine pasta tossed in rich parmesan cream sauce with tender grilled chicken breast, fresh parsley, and cracked black pepper.",
-    image: "https://images.unsplash.com/photo-1645112411341-6c4fd023714a?auto=format&fit=crop&w=600&q=80",
-    isPopular: true,
-    inStock: true
-  },
-  {
-    id: "m11",
-    name: "Belgian Chocolate Lava Cake",
-    category: "desserts",
-    price: 260,
-    description: "Warm chocolate cake with a molten Belgian dark chocolate center, served with a scoop of Madagascar vanilla bean ice cream.",
+    id: "o4",
+    name: "Dream Cake",
+    category: "others",
+    price: 50,
+    description: "Moist double-chocolate layered dessert slice cake.",
     image: "https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&w=600&q=80",
-    isPopular: true,
-    inStock: true
-  },
-  {
-    id: "m13",
-    name: "Mango Passionfruit Mojito",
-    category: "cold-drinks",
-    price: 210,
-    description: "Sparkling soda layered with Alphonso mango puree, passionfruit nectar, muddled mint leaves, and lime juice.",
-    image: "https://images.unsplash.com/photo-1513558161293-cdaf765ed2fd?auto=format&fit=crop&w=600&q=80",
-    isPopular: true,
-    inStock: true
-  },
-  {
-    id: "m14",
-    name: "Loaded Buzz Fries",
-    category: "snacks",
-    price: 190,
-    description: "Golden seasoned french fries topped with melted cheddar sauce, jalapeno slices, crispy fried onions, and spicy mayo drizzle.",
-    image: "https://images.unsplash.com/photo-1576107232684-1279f390859f?auto=format&fit=crop&w=600&q=80",
     isPopular: true,
     inStock: true
   }
@@ -206,12 +315,10 @@ class Store extends EventTarget {
   }
 
   initStorage() {
-    if (!localStorage.getItem(STORAGE_KEYS.MENU)) {
-      localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(INITIAL_MENU_ITEMS));
-    }
-    if (!localStorage.getItem(STORAGE_KEYS.CATEGORIES)) {
-      localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(INITIAL_CATEGORIES));
-    }
+    // Sync official ChaaBuzz menu items and categories
+    localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(INITIAL_MENU_ITEMS));
+    localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(INITIAL_CATEGORIES));
+
     if (!localStorage.getItem(STORAGE_KEYS.TABLES)) {
       localStorage.setItem(STORAGE_KEYS.TABLES, JSON.stringify(INITIAL_TABLES));
     }
@@ -777,7 +884,7 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
         <div className="max-w-4xl mx-auto mt-5">
           <input
             type="text"
-            placeholder="Search coffee, tea, burgers, pasta, desserts..."
+            placeholder="Search tea, buns, burgers, lassi, snacks..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             className="w-full bg-stone-800 text-white text-xs rounded-2xl px-4 py-3 border border-stone-700 focus:outline-none focus:border-amber-500"
@@ -1310,13 +1417,13 @@ function AdminPanel({ onOpenPrintQr }) {
 
             <div>
               <label className="text-xs font-bold text-stone-700 block mb-1">Item Name</label>
-              <input name="name" defaultValue={editingItem?.name} required placeholder="e.g. Hazelnut Frappe" className="w-full bg-stone-50 border rounded-xl p-2.5 text-xs font-bold" />
+              <input name="name" defaultValue={editingItem?.name} required placeholder="e.g. Shahi Malai Chaa" className="w-full bg-stone-50 border rounded-xl p-2.5 text-xs font-bold" />
             </div>
 
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="text-xs font-bold text-stone-700 block mb-1">Category</label>
-                <select name="category" defaultValue={editingItem?.category || 'coffee'} className="w-full bg-stone-50 border rounded-xl p-2.5 text-xs font-bold capitalize">
+                <select name="category" defaultValue={editingItem?.category || 'chaa'} className="w-full bg-stone-50 border rounded-xl p-2.5 text-xs font-bold capitalize">
                   {categories.filter(c => c.id !== 'all').map(c => (
                     <option key={c.id} value={c.id}>{c.name}</option>
                   ))}
@@ -1325,7 +1432,7 @@ function AdminPanel({ onOpenPrintQr }) {
 
               <div>
                 <label className="text-xs font-bold text-stone-700 block mb-1">Price (৳)</label>
-                <input type="number" name="price" defaultValue={editingItem?.price} required placeholder="250" className="w-full bg-stone-50 border rounded-xl p-2.5 text-xs font-bold" />
+                <input type="number" name="price" defaultValue={editingItem?.price} required placeholder="50" className="w-full bg-stone-50 border rounded-xl p-2.5 text-xs font-bold" />
               </div>
             </div>
 
