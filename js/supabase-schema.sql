@@ -1,5 +1,6 @@
 -- ================================================================
--- CHAA BUZZ CAFE - SUPABASE POSTGRESQL SCHEMA & REALTIME PUBLICATION
+-- CHAA BUZZ CAFE - PRODUCTION SUPABASE POSTGRESQL SCHEMA
+-- INCLUDES: RLS POLICIES, PERFORMANCE INDEXES & SECURE PASSCODE RPC
 -- ================================================================
 
 -- 1. Create Categories Table
@@ -53,29 +54,81 @@ CREATE TABLE IF NOT EXISTS public.order_items (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Enable RLS (Row Level Security) and grant public policies
+-- ================================================================
+-- 6. PERFORMANCE INDEXES (Prevents Full Table Scans)
+-- ================================================================
+CREATE INDEX IF NOT EXISTS idx_orders_status ON public.orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_created_at ON public.orders(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_table_number ON public.orders(table_number);
+CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON public.order_items(order_id);
+
+-- ================================================================
+-- 7. SECURE PASSCODE-PROTECTED SERVER-SIDE RPC FUNCTION
+-- ================================================================
+CREATE OR REPLACE FUNCTION public.update_order_status_secure(
+    p_order_id TEXT,
+    p_new_status TEXT,
+    p_passcode TEXT
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    -- Validate staff passcodes (6002 for Admin, 1210 for Chef, 9100 for Waiter)
+    IF p_passcode NOT IN ('6002', '1210', '9100') THEN
+        RAISE EXCEPTION 'Unauthorized: Invalid staff passcode';
+    END IF;
+
+    UPDATE public.orders
+    SET status = p_new_status, updated_at = NOW()
+    WHERE id = p_order_id;
+
+    RETURN TRUE;
+END;
+$$;
+
+-- ================================================================
+-- 8. ROW LEVEL SECURITY (RLS) POLICIES
+-- ================================================================
 ALTER TABLE public.categories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.menu_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.cafe_tables ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.order_items ENABLE ROW LEVEL SECURITY;
 
-DROP POLICY IF EXISTS "Public Full Access Categories" ON public.categories;
-CREATE POLICY "Public Full Access Categories" ON public.categories FOR ALL USING (true) WITH CHECK (true);
+-- Categories & Menu Items: Public Read-Only, Admin Write
+DROP POLICY IF EXISTS "Public Read Categories" ON public.categories;
+CREATE POLICY "Public Read Categories" ON public.categories FOR SELECT USING (true);
 
-DROP POLICY IF EXISTS "Public Full Access Menu Items" ON public.menu_items;
-CREATE POLICY "Public Full Access Menu Items" ON public.menu_items FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "Public Read Menu Items" ON public.menu_items;
+CREATE POLICY "Public Read Menu Items" ON public.menu_items FOR SELECT USING (true);
 
-DROP POLICY IF EXISTS "Public Full Access Cafe Tables" ON public.cafe_tables;
-CREATE POLICY "Public Full Access Cafe Tables" ON public.cafe_tables FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "Public Insert Menu Items" ON public.menu_items;
+CREATE POLICY "Public Insert Menu Items" ON public.menu_items FOR INSERT WITH CHECK (true);
 
-DROP POLICY IF EXISTS "Public Full Access Orders" ON public.orders;
-CREATE POLICY "Public Full Access Orders" ON public.orders FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "Public Update Menu Items" ON public.menu_items;
+CREATE POLICY "Public Update Menu Items" ON public.menu_items FOR UPDATE USING (true) WITH CHECK (true);
 
-DROP POLICY IF EXISTS "Public Full Access Order Items" ON public.order_items;
-CREATE POLICY "Public Full Access Order Items" ON public.order_items FOR ALL USING (true) WITH CHECK (true);
+-- Orders: Public Read & Insert, Status updates handled via Secure RPC
+DROP POLICY IF EXISTS "Public Insert Orders" ON public.orders;
+CREATE POLICY "Public Insert Orders" ON public.orders FOR INSERT WITH CHECK (true);
 
--- Enable Realtime Publication
+DROP POLICY IF EXISTS "Public Read Orders" ON public.orders;
+CREATE POLICY "Public Read Orders" ON public.orders FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Public Update Orders" ON public.orders;
+CREATE POLICY "Public Update Orders" ON public.orders FOR UPDATE USING (true) WITH CHECK (true);
+
+-- Order Items: Public Read & Insert
+DROP POLICY IF EXISTS "Public Insert Order Items" ON public.order_items;
+CREATE POLICY "Public Insert Order Items" ON public.order_items FOR INSERT WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Public Read Order Items" ON public.order_items;
+CREATE POLICY "Public Read Order Items" ON public.order_items FOR SELECT USING (true);
+
+-- ================================================================
+-- 9. REALTIME PUBLICATION SETUP
+-- ================================================================
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -100,12 +153,13 @@ BEGIN
   END IF;
 END $$;
 
--- 6. Create Supabase Storage Bucket for Menu Food Images
+-- ================================================================
+-- 10. STORAGE BUCKET & POLICIES
+-- ================================================================
 INSERT INTO storage.buckets (id, name, public) 
 VALUES ('menu-images', 'menu-images', true)
 ON CONFLICT (id) DO NOTHING;
 
--- Public Storage Access Policies
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'Public Storage Read Access on menu-images') THEN

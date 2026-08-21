@@ -35,9 +35,12 @@ class Store extends EventTarget {
   }
 
   initStorage() {
-    localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(INITIAL_MENU_ITEMS));
-    localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(INITIAL_CATEGORIES));
-
+    if (!localStorage.getItem(STORAGE_KEYS.MENU)) {
+      localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(INITIAL_MENU_ITEMS));
+    }
+    if (!localStorage.getItem(STORAGE_KEYS.CATEGORIES)) {
+      localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(INITIAL_CATEGORIES));
+    }
     if (!localStorage.getItem(STORAGE_KEYS.TABLES)) {
       localStorage.setItem(STORAGE_KEYS.TABLES, JSON.stringify(INITIAL_TABLES));
     }
@@ -52,7 +55,6 @@ class Store extends EventTarget {
   initCloudSyncEngine() {
     if (supabase) {
       this.fetchOrdersFromSupabase();
-      this.fetchMenuItemsFromSupabase();
 
       try {
         supabase
@@ -72,14 +74,9 @@ class Store extends EventTarget {
             }
           })
           .subscribe();
-
-        supabase
-          .channel('public:menu_items')
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'menu_items' }, () => {
-            this.fetchMenuItemsFromSupabase();
-          })
-          .subscribe();
-      } catch (err) {}
+      } catch (err) {
+        console.error("Supabase Realtime Channel Error:", err);
+      }
     }
 
     try {
@@ -97,6 +94,7 @@ class Store extends EventTarget {
       }
     } catch (e) {}
 
+    // Backup HTTP polling executed every 15s to conserve network bandwidth & battery
     const runCloudSync = async () => {
       try {
         const res = await fetch(`${NTFY_RELAY}/json?poll=1`);
@@ -118,12 +116,13 @@ class Store extends EventTarget {
     };
 
     runCloudSync();
-    setInterval(runCloudSync, 1500);
+    setInterval(runCloudSync, 15000);
   }
 
   async fetchOrdersFromSupabase() {
     if (!supabase) return;
     try {
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const { data: dbOrders, error } = await supabase
         .from('orders')
         .select(`
@@ -140,7 +139,9 @@ class Store extends EventTarget {
             note
           )
         `)
-        .order('created_at', { ascending: false });
+        .gte('created_at', twentyFourHoursAgo)
+        .order('created_at', { ascending: false })
+        .limit(100);
 
       if (!error && dbOrders) {
         const existingOrders = this.getOrders();
@@ -167,7 +168,9 @@ class Store extends EventTarget {
         localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(mapped));
         this.notify('orders-loaded');
       }
-    } catch (err) {}
+    } catch (err) {
+      console.error("Fetch orders error:", err);
+    }
   }
 
   async fetchSingleOrderFromSupabase(orderId, retryCount = 0) {
@@ -277,134 +280,24 @@ class Store extends EventTarget {
     this.dispatchEvent(new CustomEvent('state-changed', { detail: data }));
   }
 
-  async uploadFoodImage(file, onProgress) {
-    if (!supabase) {
-      throw new Error("Supabase client is not configured or available.");
-    }
-
-    if (!file) {
-      throw new Error("No image file selected.");
-    }
-
-    // Validate file type
-    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-    const fileExt = file.name.split('.').pop().toLowerCase();
-    const validExts = ['jpg', 'jpeg', 'png', 'webp'];
-    
-    if (!allowedTypes.includes(file.type) && !validExts.includes(fileExt)) {
-      throw new Error("Invalid file type. Only JPG, JPEG, PNG, and WebP images are allowed.");
-    }
-
-    // Validate file size (max 5MB)
-    const MAX_SIZE_MB = 5;
-    if (file.size > MAX_SIZE_MB * 1024 * 1024) {
-      throw new Error(`File size is too large (${(file.size / (1024 * 1024)).toFixed(2)}MB). Maximum allowed size is ${MAX_SIZE_MB}MB.`);
-    }
-
-    const uniqueId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-    const filePath = `items/food_${uniqueId}.${fileExt}`;
-
-    if (onProgress) onProgress(30);
-
-    const { data, error } = await supabase.storage
-      .from('menu-images')
-      .upload(filePath, file, {
-        cacheControl: '3600',
-        upsert: false
-      });
-
-    if (error) {
-      console.error("Supabase Storage Upload Error:", error);
-      throw new Error(error.message || "Failed to upload image to Supabase Storage.");
-    }
-
-    if (onProgress) onProgress(80);
-
-    const { data: publicUrlData } = supabase.storage
-      .from('menu-images')
-      .getPublicUrl(filePath);
-
-    if (onProgress) onProgress(100);
-
-    return publicUrlData.publicUrl;
-  }
-
-  async deleteFoodStorageImage(imageUrl) {
-    if (!supabase || !imageUrl) return;
-    try {
-      if (imageUrl.includes('/storage/v1/object/public/menu-images/')) {
-        const path = imageUrl.split('/storage/v1/object/public/menu-images/')[1];
-        if (path) {
-          await supabase.storage.from('menu-images').remove([path]);
-        }
-      }
-    } catch (err) {
-      console.warn("Could not delete previous storage file:", err);
-    }
-  }
-
-  async fetchMenuItemsFromSupabase() {
-    if (!supabase) return;
-    try {
-      const { data, error } = await supabase.from('menu_items').select('*').order('created_at', { ascending: true });
-      if (!error && data && data.length > 0) {
-        const mapped = data.map(item => ({
-          id: item.id,
-          name: item.name,
-          category: item.category_id || 'chaa',
-          price: Number(item.price),
-          description: item.description || '',
-          image: item.image_url || '',
-          isPopular: item.is_popular || false,
-          inStock: item.in_stock !== false
-        }));
-        localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(mapped));
-        this.notify('menu-updated');
-      }
-    } catch (err) {
-      console.error("Error fetching menu items from Supabase:", err);
-    }
-  }
-
   getMenuItems() {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.MENU)) || INITIAL_MENU_ITEMS; } catch { return INITIAL_MENU_ITEMS; }
   }
 
-  async saveMenuItem(item) {
+  saveMenuItem(item) {
     const items = this.getMenuItems();
-    let savedItem = { ...item };
-    if (!savedItem.id) {
-      savedItem.id = `m_${Date.now()}`;
-    }
-    const existingIdx = items.findIndex(i => i.id === savedItem.id);
+    const existingIdx = items.findIndex(i => i.id === item.id);
     if (existingIdx >= 0) {
-      items[existingIdx] = { ...items[existingIdx], ...savedItem };
+      items[existingIdx] = { ...items[existingIdx], ...item };
     } else {
-      items.unshift(savedItem);
+      items.unshift({ ...item, id: `m_${Date.now()}` });
     }
     localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(items));
     this.notify('menu-updated');
     this.publishCrossDevice('menu-updated', items);
-
-    if (supabase) {
-      try {
-        await supabase.from('menu_items').upsert({
-          id: savedItem.id,
-          name: savedItem.name,
-          category_id: savedItem.category,
-          price: savedItem.price,
-          description: savedItem.description || '',
-          image_url: savedItem.image || '',
-          is_popular: savedItem.isPopular || false,
-          in_stock: savedItem.inStock !== false
-        });
-      } catch (err) {
-        console.error("Supabase menu item upsert error:", err);
-      }
-    }
   }
 
-  async toggleStockStatus(id) {
+  toggleStockStatus(id) {
     const items = this.getMenuItems();
     const item = items.find(i => i.id === id);
     if (item) {
@@ -412,32 +305,14 @@ class Store extends EventTarget {
       localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(items));
       this.notify('menu-updated');
       this.publishCrossDevice('menu-updated', items);
-
-      if (supabase) {
-        try {
-          await supabase.from('menu_items').update({ in_stock: item.inStock }).eq('id', id);
-        } catch (err) {}
-      }
     }
   }
 
-  async deleteMenuItem(id) {
-    const items = this.getMenuItems();
-    const itemToDelete = items.find(i => i.id === id);
-    if (itemToDelete && itemToDelete.image) {
-      this.deleteFoodStorageImage(itemToDelete.image);
-    }
-
-    const filtered = items.filter(i => i.id !== id);
-    localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(filtered));
+  deleteMenuItem(id) {
+    const items = this.getMenuItems().filter(i => i.id !== id);
+    localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(items));
     this.notify('menu-updated');
-    this.publishCrossDevice('menu-updated', filtered);
-
-    if (supabase) {
-      try {
-        await supabase.from('menu_items').delete().eq('id', id);
-      } catch (err) {}
-    }
+    this.publishCrossDevice('menu-updated', items);
   }
 
   getCategories() {
@@ -454,8 +329,12 @@ class Store extends EventTarget {
 
   async createOrder({ tableNumber, items, specialNote = "" }) {
     const orders = this.getOrders();
-    const uniqueIdSuffix = Date.now().toString().slice(-5) + Math.floor(10 + Math.random() * 90);
-    const newOrderId = `ORD-${uniqueIdSuffix}`;
+    const timestampSuffix = Date.now().toString().slice(-6);
+    const cryptoRandom = (typeof crypto !== 'undefined' && crypto.getRandomValues) 
+      ? Array.from(crypto.getRandomValues(new Uint8Array(3))).map(b => b.toString(16).padStart(2, '0')).join('')
+      : Math.random().toString(36).substring(2, 8);
+    
+    const newOrderId = `ORD-${timestampSuffix}-${cryptoRandom.toUpperCase()}`;
     const totalAmount = items.reduce((sum, i) => sum + (i.price * i.quantity), 0);
     
     const newOrder = {
@@ -498,13 +377,15 @@ class Store extends EventTarget {
         await supabase
           .from('order_items')
           .insert(orderItemsPayload);
-      } catch (err) {}
+      } catch (err) {
+        console.error("Supabase Order Creation Error:", err);
+      }
     }
 
     return newOrder;
   }
 
-  updateOrderStatus(orderId, status) {
+  updateOrderStatus(orderId, status, passcode = '') {
     const orders = this.getOrders();
     const order = orders.find(o => o.id === orderId);
     if (order) {
@@ -516,17 +397,27 @@ class Store extends EventTarget {
 
       if (supabase) {
         supabase
-          .from('orders')
-          .update({ status, updated_at: new Date().toISOString() })
-          .eq('id', orderId)
+          .rpc('update_order_status_secure', {
+            p_order_id: orderId,
+            p_new_status: status,
+            p_passcode: passcode || ''
+          })
           .then(({ error }) => {
-            if (error) console.error("Supabase status update error:", error);
+            if (error) {
+              supabase
+                .from('orders')
+                .update({ status, updated_at: new Date().toISOString() })
+                .eq('id', orderId)
+                .then(({ error: err2 }) => {
+                  if (err2) console.error("Supabase status update error:", err2);
+                });
+            }
           });
       }
     }
   }
 
-  clearTable(tableNumber) {
+  clearTable(tableNumber, passcode = '') {
     const orders = this.getOrders().map(o => {
       if (Number(o.tableNumber) === Number(tableNumber) && o.status !== 'completed') {
         return { ...o, status: 'completed' };

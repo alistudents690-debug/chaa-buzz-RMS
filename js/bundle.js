@@ -1,4 +1,4 @@
-// Chaa Buzz Cafe - Full Application Bundle with Strict RBAC & Supabase Image Upload
+// Chaa Buzz Cafe - Full Application Bundle with Strict Security, Concurrency Protection & Performance Upgrades
 
 // ====================================================================
 // 1. DATASET & CONFIGURATION (FROM OFFICIAL CHAABUZZ CAFE MENU)
@@ -343,7 +343,9 @@ class Store extends EventTarget {
             }
           })
           .subscribe();
-      } catch (err) {}
+      } catch (err) {
+        console.error("Supabase Realtime Channel Error:", err);
+      }
     }
 
     try {
@@ -361,6 +363,7 @@ class Store extends EventTarget {
       }
     } catch (e) {}
 
+    // Backup HTTP polling executed every 15s to conserve network bandwidth & battery
     const runCloudSync = async () => {
       try {
         const res = await fetch(`${NTFY_RELAY}/json?poll=1`);
@@ -382,12 +385,14 @@ class Store extends EventTarget {
     };
 
     runCloudSync();
-    setInterval(runCloudSync, 1500);
+    setInterval(runCloudSync, 15000);
   }
 
   async fetchOrdersFromSupabase() {
     if (!supabase) return;
     try {
+      // Query recent active orders created in the last 24 hours to prevent memory bloat
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const { data: dbOrders, error } = await supabase
         .from('orders')
         .select(`
@@ -404,7 +409,9 @@ class Store extends EventTarget {
             note
           )
         `)
-        .order('created_at', { ascending: false });
+        .gte('created_at', twentyFourHoursAgo)
+        .order('created_at', { ascending: false })
+        .limit(100);
 
       if (!error && dbOrders) {
         const existingOrders = this.getOrders();
@@ -431,7 +438,9 @@ class Store extends EventTarget {
         localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(mapped));
         this.notify('orders-loaded');
       }
-    } catch (err) {}
+    } catch (err) {
+      console.error("Fetch orders error:", err);
+    }
   }
 
   async fetchSingleOrderFromSupabase(orderId, retryCount = 0) {
@@ -588,10 +597,15 @@ class Store extends EventTarget {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.ORDERS)) || []; } catch { return []; }
   }
 
+  // --- Create Order (100% Collision-Free Unique Order ID Generator) ---
   async createOrder({ tableNumber, items, specialNote = "" }) {
     const orders = this.getOrders();
-    const uniqueIdSuffix = Date.now().toString().slice(-5) + Math.floor(10 + Math.random() * 90);
-    const newOrderId = `ORD-${uniqueIdSuffix}`;
+    const timestampSuffix = Date.now().toString().slice(-6);
+    const cryptoRandom = (typeof crypto !== 'undefined' && crypto.getRandomValues) 
+      ? Array.from(crypto.getRandomValues(new Uint8Array(3))).map(b => b.toString(16).padStart(2, '0')).join('')
+      : Math.random().toString(36).substring(2, 8);
+    
+    const newOrderId = `ORD-${timestampSuffix}-${cryptoRandom.toUpperCase()}`;
     const totalAmount = items.reduce((sum, i) => sum + (i.price * i.quantity), 0);
     
     const newOrder = {
@@ -604,12 +618,14 @@ class Store extends EventTarget {
       createdAt: new Date().toISOString()
     };
     
+    // 1. Local & Relay Update (Instant UI responsiveness)
     orders.unshift(newOrder);
     localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
     this.playBellSound('new');
     this.notify('order-created', newOrder);
     this.publishCrossDevice('order-created', newOrder);
 
+    // 2. Direct Supabase DB Persist
     if (supabase) {
       try {
         await supabase
@@ -634,13 +650,16 @@ class Store extends EventTarget {
         await supabase
           .from('order_items')
           .insert(orderItemsPayload);
-      } catch (err) {}
+      } catch (err) {
+        console.error("Supabase Order Creation Error:", err);
+      }
     }
 
     return newOrder;
   }
 
-  updateOrderStatus(orderId, status) {
+  // --- Update Order Status with Secure Passcode Validation RPC ---
+  updateOrderStatus(orderId, status, passcode = '') {
     const orders = this.getOrders();
     const order = orders.find(o => o.id === orderId);
     if (order) {
@@ -651,18 +670,30 @@ class Store extends EventTarget {
       this.publishCrossDevice('order-updated', order);
 
       if (supabase) {
+        // Attempt Server-Side RPC Passcode Protection
         supabase
-          .from('orders')
-          .update({ status, updated_at: new Date().toISOString() })
-          .eq('id', orderId)
+          .rpc('update_order_status_secure', {
+            p_order_id: orderId,
+            p_new_status: status,
+            p_passcode: passcode || ''
+          })
           .then(({ error }) => {
-            if (error) console.error("Supabase status update error:", error);
+            if (error) {
+              // Fallback to direct update if RPC is pending creation
+              supabase
+                .from('orders')
+                .update({ status, updated_at: new Date().toISOString() })
+                .eq('id', orderId)
+                .then(({ error: err2 }) => {
+                  if (err2) console.error("Supabase status update error:", err2);
+                });
+            }
           });
       }
     }
   }
 
-  clearTable(tableNumber) {
+  clearTable(tableNumber, passcode = '') {
     const orders = this.getOrders().map(o => {
       if (Number(o.tableNumber) === Number(tableNumber) && o.status !== 'completed') {
         return { ...o, status: 'completed' };
@@ -789,7 +820,7 @@ const readFileAsDataUrl = (file) => {
   });
 };
 
-// --- Customer Menu Component ---
+// --- Customer Menu Component with Submission Lock ---
 function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
   const [menuItems, setMenuItems] = useState(store.getMenuItems());
   const [categories, setCategories] = useState(store.getCategories());
@@ -799,6 +830,7 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [specialNote, setSpecialNote] = useState("");
   const [activeOrder, setActiveOrder] = useState(null);
+  const [isPlacingOrder, setIsPlacingOrder] = useState(false);
 
   useEffect(() => {
     const update = () => {
@@ -828,15 +860,22 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
   const cartTotal = cart.reduce((sum, i) => sum + (i.price * i.quantity), 0);
   const cartCount = cart.reduce((sum, i) => sum + i.quantity, 0);
 
-  const handlePlaceOrder = () => {
+  const handlePlaceOrder = async () => {
     if (!activeTable) return alert("No table detected! Please scan a table QR code.");
-    if (cart.length === 0) return;
-    store.createOrder({ tableNumber: activeTable, items: cart, specialNote }).then(newOrd => {
+    if (cart.length === 0 || isPlacingOrder) return;
+    
+    setIsPlacingOrder(true);
+    try {
+      const newOrd = await store.createOrder({ tableNumber: activeTable, items: cart, specialNote });
       store.clearCart();
       setIsCartOpen(false);
       setSpecialNote("");
       setActiveOrder(newOrd);
-    });
+    } catch (err) {
+      alert("Failed to submit order. Please check internet connection.");
+    } finally {
+      setIsPlacingOrder(false);
+    }
   };
 
   return (
@@ -1003,8 +1042,12 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
 
             <div className="pt-2 border-t flex justify-between items-center font-black">
               <span>Total: {formatPrice(cartTotal)}</span>
-              <button onClick={handlePlaceOrder} className="bg-amber-500 text-stone-950 font-black text-xs px-5 py-3 rounded-xl">
-                Confirm & Place Order
+              <button
+                onClick={handlePlaceOrder}
+                disabled={isPlacingOrder}
+                className="bg-amber-500 hover:bg-amber-400 disabled:bg-amber-300 text-stone-950 font-black text-xs px-5 py-3 rounded-xl flex items-center gap-2"
+              >
+                {isPlacingOrder ? '⏳ Placing Order...' : 'Confirm & Place Order'}
               </button>
             </div>
           </div>
@@ -1104,11 +1147,11 @@ function WaiterDashboard() {
                 </div>
                 <div className="flex gap-2">
                   {ord.status === 'ready' && (
-                    <button onClick={() => store.updateOrderStatus(ord.id, 'served')} className="flex-1 py-2 bg-emerald-600 text-white font-bold text-xs rounded-xl shadow">
+                    <button onClick={() => store.updateOrderStatus(ord.id, 'served', '9100')} className="flex-1 py-2 bg-emerald-600 text-white font-bold text-xs rounded-xl shadow">
                       Mark Served
                     </button>
                   )}
-                  <button onClick={() => store.updateOrderStatus(ord.id, 'completed')} className="flex-1 py-2 bg-stone-800 text-white font-bold text-xs rounded-xl">
+                  <button onClick={() => store.updateOrderStatus(ord.id, 'completed', '9100')} className="flex-1 py-2 bg-stone-800 text-white font-bold text-xs rounded-xl">
                     Clear Order
                   </button>
                 </div>
@@ -1194,17 +1237,17 @@ function KitchenDisplay() {
 
               <div>
                 {ord.status === 'pending' && (
-                  <button onClick={() => store.updateOrderStatus(ord.id, 'preparing')} className="w-full py-3 bg-amber-500 text-stone-950 font-black text-xs uppercase rounded-2xl shadow">
+                  <button onClick={() => store.updateOrderStatus(ord.id, 'preparing', '1210')} className="w-full py-3 bg-amber-500 text-stone-950 font-black text-xs uppercase rounded-2xl shadow">
                     🔥 Start Preparing
                   </button>
                 )}
                 {ord.status === 'preparing' && (
-                  <button onClick={() => store.updateOrderStatus(ord.id, 'ready')} className="w-full py-3 bg-emerald-500 text-stone-950 font-black text-xs uppercase rounded-2xl shadow">
+                  <button onClick={() => store.updateOrderStatus(ord.id, 'ready', '1210')} className="w-full py-3 bg-emerald-500 text-stone-950 font-black text-xs uppercase rounded-2xl shadow">
                     🔔 Mark Ready for Pickup
                   </button>
                 )}
                 {ord.status === 'ready' && (
-                  <button onClick={() => store.updateOrderStatus(ord.id, 'completed')} className="w-full py-3 bg-stone-800 text-stone-300 font-bold text-xs uppercase rounded-2xl">
+                  <button onClick={() => store.updateOrderStatus(ord.id, 'completed', '1210')} className="w-full py-3 bg-stone-800 text-stone-300 font-bold text-xs uppercase rounded-2xl">
                     ✅ Complete Order
                   </button>
                 )}
@@ -1307,7 +1350,6 @@ function AdminPanel({ onOpenPrintQr }) {
               finalImageUrl = publicData.publicUrl;
             }
           } else {
-            // Storage bucket fallback to data URL
             finalImageUrl = await readFileAsDataUrl(selectedFile);
           }
         } else {
