@@ -1,4 +1,4 @@
-// Chaa Buzz Cafe - Full Application Bundle with Strict Security, Concurrency Protection & Performance Upgrades
+// Chaa Buzz Cafe - Full Application Bundle with Concurrency-Safe 4-Person Table Limit Enforcement
 
 // ====================================================================
 // 1. DATASET & CONFIGURATION (FROM OFFICIAL CHAABUZZ CAFE MENU)
@@ -26,6 +26,22 @@ const SUPABASE_KEY = "sb_publishable_CdBFJUtArtuAyveQue5aQQ_UnkXlRkt";
 const supabase = (window.supabase && window.supabase.createClient) 
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) 
   : null;
+
+// Unique Device Session Generator (Ensures tab refresh / reopen doesn't take extra seats)
+function getOrCreateSessionId() {
+  try {
+    let sid = localStorage.getItem('chaa_buzz_session_id');
+    if (!sid) {
+      sid = (typeof crypto !== 'undefined' && crypto.randomUUID) 
+        ? crypto.randomUUID() 
+        : `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      localStorage.setItem('chaa_buzz_session_id', sid);
+    }
+    return sid;
+  } catch (e) {
+    return `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  }
+}
 
 const PRESET_IMAGES = [
   { label: "☕ Dud Chaa", url: "https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=600&q=80" },
@@ -391,7 +407,6 @@ class Store extends EventTarget {
   async fetchOrdersFromSupabase() {
     if (!supabase) return;
     try {
-      // Query recent active orders created in the last 24 hours to prevent memory bloat
       const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const { data: dbOrders, error } = await supabase
         .from('orders')
@@ -618,7 +633,7 @@ class Store extends EventTarget {
       createdAt: new Date().toISOString()
     };
     
-    // 1. Local & Relay Update (Instant UI responsiveness)
+    // 1. Local & Relay Update
     orders.unshift(newOrder);
     localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
     this.playBellSound('new');
@@ -670,7 +685,6 @@ class Store extends EventTarget {
       this.publishCrossDevice('order-updated', order);
 
       if (supabase) {
-        // Attempt Server-Side RPC Passcode Protection
         supabase
           .rpc('update_order_status_secure', {
             p_order_id: orderId,
@@ -679,7 +693,6 @@ class Store extends EventTarget {
           })
           .then(({ error }) => {
             if (error) {
-              // Fallback to direct update if RPC is pending creation
               supabase
                 .from('orders')
                 .update({ status, updated_at: new Date().toISOString() })
@@ -705,6 +718,7 @@ class Store extends EventTarget {
     this.publishCrossDevice('table-cleared', { tableNumber });
 
     if (supabase) {
+      // 1. Update orders status to completed
       supabase
         .from('orders')
         .update({ status: 'completed', updated_at: new Date().toISOString() })
@@ -713,6 +727,11 @@ class Store extends EventTarget {
         .then(({ error }) => {
           if (error) console.error("Supabase table clear error:", error);
         });
+
+      // 2. Reset / Clear Table Customer Sessions
+      supabase
+        .rpc('clear_table_sessions', { p_table_number: Number(tableNumber) })
+        .catch(() => {});
     }
   }
 
@@ -810,7 +829,7 @@ function QrCodeSvg({ value, size = 160 }) {
   return <div ref={containerRef} className="flex justify-center items-center bg-white p-2 rounded-xl" />;
 }
 
-// Helper to convert File to Base64 Data URL (Fallback for storage)
+// Helper to convert File to Base64 Data URL
 const readFileAsDataUrl = (file) => {
   return new Promise((resolve) => {
     const reader = new FileReader();
@@ -820,7 +839,7 @@ const readFileAsDataUrl = (file) => {
   });
 };
 
-// --- Customer Menu Component with Submission Lock ---
+// --- Customer Menu Component with Concurrency-Safe 4-Person Table Limit Enforcement ---
 function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
   const [menuItems, setMenuItems] = useState(store.getMenuItems());
   const [categories, setCategories] = useState(store.getCategories());
@@ -831,6 +850,10 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
   const [specialNote, setSpecialNote] = useState("");
   const [activeOrder, setActiveOrder] = useState(null);
   const [isPlacingOrder, setIsPlacingOrder] = useState(false);
+
+  // 4-Person Capacity Limits State
+  const [tableFullError, setTableFullError] = useState(null);
+  const [tableCapacityInfo, setTableCapacityInfo] = useState(null);
 
   useEffect(() => {
     const update = () => {
@@ -848,6 +871,40 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
     return () => store.removeEventListener('state-changed', update);
   }, [activeTable]);
 
+  // Concurrency-Safe Database Table Session Join (Max 4 Active Customers)
+  useEffect(() => {
+    if (!activeTable) return;
+    const sessionId = getOrCreateSessionId();
+
+    const checkTableSession = async () => {
+      if (supabase) {
+        try {
+          const { data, error } = await supabase.rpc('join_table_session', {
+            p_table_number: Number(activeTable),
+            p_session_id: sessionId,
+            p_max_capacity: 4,
+            p_timeout_minutes: 15
+          });
+
+          if (!error && data) {
+            setTableCapacityInfo(data);
+            if (!data.allowed) {
+              setTableFullError(data.message || "This table is full (4/4). Please ask the waiter for assistance.");
+            } else {
+              setTableFullError(null);
+            }
+          }
+        } catch (err) {
+          console.error("Table capacity check error:", err);
+        }
+      }
+    };
+
+    checkTableSession();
+    const interval = setInterval(checkTableSession, 25000); // 25s session heartbeat
+    return () => clearInterval(interval);
+  }, [activeTable]);
+
   const filteredItems = useMemo(() => {
     return menuItems.filter(item => {
       const matchCat = selectedCategory === "all" || item.category === selectedCategory;
@@ -862,6 +919,7 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
 
   const handlePlaceOrder = async () => {
     if (!activeTable) return alert("No table detected! Please scan a table QR code.");
+    if (tableFullError) return alert(tableFullError);
     if (cart.length === 0 || isPlacingOrder) return;
     
     setIsPlacingOrder(true);
@@ -880,6 +938,40 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
 
   return (
     <div className="min-h-screen pb-28">
+      {/* FULL TABLE CAPACITY (4/4) LOCK SCREEN MODAL */}
+      {tableFullError && (
+        <div className="fixed inset-0 bg-stone-950/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-8 shadow-2xl text-center space-y-4">
+            <div className="w-16 h-16 bg-amber-100 text-amber-900 text-3xl rounded-3xl flex items-center justify-center mx-auto shadow-inner">
+              🪑
+            </div>
+            <div>
+              <span className="text-[10px] uppercase font-black tracking-widest text-amber-800 bg-amber-100 px-3 py-1 rounded-full">
+                Table Capacity Reached
+              </span>
+              <h2 className="text-xl font-black text-stone-900 mt-2">Table {activeTable} is Full</h2>
+            </div>
+            
+            <p className="text-xs font-bold text-stone-700 bg-stone-50 p-4 rounded-2xl border border-stone-200 leading-relaxed">
+              {tableFullError}
+            </p>
+            
+            <p className="text-[11px] text-stone-500 italic">
+              Each table has a maximum limit of 4 active customers. When staff clears the table or an inactive session expires, seats will unlock.
+            </p>
+
+            <div className="pt-2">
+              <button
+                onClick={() => window.location.reload()}
+                className="w-full py-3 bg-stone-900 hover:bg-stone-800 text-white font-extrabold text-xs rounded-2xl shadow transition"
+              >
+                🔄 Re-check Seat Availability
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header Banner */}
       <div className="bg-stone-900 text-white pt-6 pb-8 px-4 rounded-b-3xl shadow-xl relative">
         <div className="max-w-4xl mx-auto flex items-center justify-between">
@@ -895,7 +987,12 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
             {activeTable ? (
               <div className="bg-amber-500/20 border border-amber-500/40 text-amber-400 px-3.5 py-1.5 rounded-full font-bold text-xs flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                Table {activeTable}
+                <span>Table {activeTable}</span>
+                {tableCapacityInfo && (
+                  <span className="text-[10px] bg-amber-500/30 px-1.5 py-0.5 rounded-full font-mono text-amber-300">
+                    ({tableCapacityInfo.active_count || 1}/4 seats)
+                  </span>
+                )}
               </div>
             ) : (
               <button onClick={() => onSelectTable(1)} className="bg-stone-800 text-stone-300 text-xs px-3 py-1.5 rounded-xl border border-stone-700">
@@ -1151,8 +1248,8 @@ function WaiterDashboard() {
                       Mark Served
                     </button>
                   )}
-                  <button onClick={() => store.updateOrderStatus(ord.id, 'completed', '9100')} className="flex-1 py-2 bg-stone-800 text-white font-bold text-xs rounded-xl">
-                    Clear Order
+                  <button onClick={() => store.clearTable(ord.tableNumber, '9100')} className="flex-1 py-2 bg-stone-800 text-white font-bold text-xs rounded-xl">
+                    Clear Table
                   </button>
                 </div>
               </div>

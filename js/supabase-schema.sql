@@ -1,6 +1,6 @@
 -- ================================================================
 -- CHAA BUZZ CAFE - PRODUCTION SUPABASE POSTGRESQL SCHEMA
--- INCLUDES: RLS POLICIES, PERFORMANCE INDEXES & SECURE PASSCODE RPC
+-- INCLUDES: RLS POLICIES, PERFORMANCE INDEXES, SECURE RPC & 4-PERSON TABLE CAPACITY
 -- ================================================================
 
 -- 1. Create Categories Table
@@ -54,16 +54,28 @@ CREATE TABLE IF NOT EXISTS public.order_items (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- 6. Create Table Sessions (Tracks Active Customers Per Table)
+CREATE TABLE IF NOT EXISTS public.table_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    table_number INT NOT NULL,
+    session_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    last_active_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(table_number, session_id)
+);
+
 -- ================================================================
--- 6. PERFORMANCE INDEXES (Prevents Full Table Scans)
+-- 7. PERFORMANCE INDEXES
 -- ================================================================
 CREATE INDEX IF NOT EXISTS idx_orders_status ON public.orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_created_at ON public.orders(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_table_number ON public.orders(table_number);
 CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON public.order_items(order_id);
+CREATE INDEX IF NOT EXISTS idx_table_sessions_lookup ON public.table_sessions(table_number, status, last_active_at DESC);
 
 -- ================================================================
--- 7. SECURE PASSCODE-PROTECTED SERVER-SIDE RPC FUNCTION
+-- 8. SECURE PASSCODE-PROTECTED SERVER-SIDE RPC FUNCTION
 -- ================================================================
 CREATE OR REPLACE FUNCTION public.update_order_status_secure(
     p_order_id TEXT,
@@ -88,13 +100,126 @@ END;
 $$;
 
 -- ================================================================
--- 8. ROW LEVEL SECURITY (RLS) POLICIES
+-- 9. CONCURRENCY-SAFE 4-PERSON TABLE CAPACITY LIMIT RPC
+-- ================================================================
+CREATE OR REPLACE FUNCTION public.join_table_session(
+    p_table_number INT,
+    p_session_id TEXT,
+    p_max_capacity INT DEFAULT 4,
+    p_timeout_minutes INT DEFAULT 15
+) RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_active_count INT;
+    v_existing_session RECORD;
+    v_cutoff TIMESTAMPTZ;
+BEGIN
+    v_cutoff := NOW() - (p_timeout_minutes || ' minutes')::INTERVAL;
+
+    -- Expire old inactive sessions for this table
+    UPDATE public.table_sessions
+    SET status = 'expired'
+    WHERE table_number = p_table_number
+      AND status = 'active'
+      AND last_active_at < v_cutoff;
+
+    -- Check if THIS customer session already exists & is active
+    SELECT * INTO v_existing_session
+    FROM public.table_sessions
+    WHERE table_number = p_table_number
+      AND session_id = p_session_id
+      AND status = 'active';
+
+    IF FOUND THEN
+        -- Touch last_active_at timestamp to keep session alive
+        UPDATE public.table_sessions
+        SET last_active_at = NOW()
+        WHERE id = v_existing_session.id;
+
+        -- Count current active sessions
+        SELECT COUNT(*) INTO v_active_count
+        FROM public.table_sessions
+        WHERE table_number = p_table_number
+          AND status = 'active';
+
+        RETURN jsonb_build_object(
+            'success', true,
+            'allowed', true,
+            'active_count', v_active_count,
+            'max_capacity', p_max_capacity,
+            'message', 'Existing session refreshed'
+        );
+    END IF;
+
+    -- LOCK table rows for concurrency safety
+    PERFORM pg_advisory_xact_lock(p_table_number);
+
+    -- Count active unexpired sessions for this table
+    SELECT COUNT(*) INTO v_active_count
+    FROM public.table_sessions
+    WHERE table_number = p_table_number
+      AND status = 'active';
+
+    -- Check if table is full (4/4)
+    IF v_active_count >= p_max_capacity THEN
+        RETURN jsonb_build_object(
+            'success', true,
+            'allowed', false,
+            'active_count', v_active_count,
+            'max_capacity', p_max_capacity,
+            'message', 'This table is full (4/4). Please ask the waiter for assistance.'
+        );
+    END IF;
+
+    -- Insert new active customer session
+    INSERT INTO public.table_sessions (table_number, session_id, status, created_at, last_active_at)
+    VALUES (p_table_number, p_session_id, 'active', NOW(), NOW())
+    ON CONFLICT (table_number, session_id) 
+    DO UPDATE SET status = 'active', last_active_at = NOW();
+
+    SELECT COUNT(*) INTO v_active_count
+    FROM public.table_sessions
+    WHERE table_number = p_table_number
+      AND status = 'active';
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'allowed', true,
+        'active_count', v_active_count,
+        'max_capacity', p_max_capacity,
+        'message', 'Session joined successfully'
+    );
+END;
+$$;
+
+-- Function to Reset/Clear Table Customer Sessions
+CREATE OR REPLACE FUNCTION public.clear_table_sessions(
+    p_table_number INT
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    UPDATE public.table_sessions
+    SET status = 'closed'
+    WHERE table_number = p_table_number
+      AND status = 'active';
+
+    RETURN TRUE;
+END;
+$$;
+
+-- ================================================================
+-- 10. ROW LEVEL SECURITY (RLS) POLICIES
 -- ================================================================
 ALTER TABLE public.categories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.menu_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.cafe_tables ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.order_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.table_sessions ENABLE ROW LEVEL SECURITY;
 
 -- Categories & Menu Items: Public Read-Only, Admin Write
 DROP POLICY IF EXISTS "Public Read Categories" ON public.categories;
@@ -109,7 +234,7 @@ CREATE POLICY "Public Insert Menu Items" ON public.menu_items FOR INSERT WITH CH
 DROP POLICY IF EXISTS "Public Update Menu Items" ON public.menu_items;
 CREATE POLICY "Public Update Menu Items" ON public.menu_items FOR UPDATE USING (true) WITH CHECK (true);
 
--- Orders: Public Read & Insert, Status updates handled via Secure RPC
+-- Orders: Public Read & Insert
 DROP POLICY IF EXISTS "Public Insert Orders" ON public.orders;
 CREATE POLICY "Public Insert Orders" ON public.orders FOR INSERT WITH CHECK (true);
 
@@ -126,8 +251,18 @@ CREATE POLICY "Public Insert Order Items" ON public.order_items FOR INSERT WITH 
 DROP POLICY IF EXISTS "Public Read Order Items" ON public.order_items;
 CREATE POLICY "Public Read Order Items" ON public.order_items FOR SELECT USING (true);
 
+-- Table Sessions: Public Full Access
+DROP POLICY IF EXISTS "Public Read Table Sessions" ON public.table_sessions;
+CREATE POLICY "Public Read Table Sessions" ON public.table_sessions FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Public Insert Table Sessions" ON public.table_sessions;
+CREATE POLICY "Public Insert Table Sessions" ON public.table_sessions FOR INSERT WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Public Update Table Sessions" ON public.table_sessions;
+CREATE POLICY "Public Update Table Sessions" ON public.table_sessions FOR UPDATE USING (true) WITH CHECK (true);
+
 -- ================================================================
--- 9. REALTIME PUBLICATION SETUP
+-- 11. REALTIME PUBLICATION SETUP
 -- ================================================================
 DO $$
 BEGIN
@@ -154,7 +289,7 @@ BEGIN
 END $$;
 
 -- ================================================================
--- 10. STORAGE BUCKET & POLICIES
+-- 12. STORAGE BUCKET & POLICIES
 -- ================================================================
 INSERT INTO storage.buckets (id, name, public) 
 VALUES ('menu-images', 'menu-images', true)
