@@ -52,6 +52,7 @@ class Store extends EventTarget {
   initCloudSyncEngine() {
     if (supabase) {
       this.fetchOrdersFromSupabase();
+      this.fetchMenuItemsFromSupabase();
 
       try {
         supabase
@@ -69,6 +70,13 @@ class Store extends EventTarget {
                 this.notify('order-updated', orders[idx]);
               }
             }
+          })
+          .subscribe();
+
+        supabase
+          .channel('public:menu_items')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'menu_items' }, () => {
+            this.fetchMenuItemsFromSupabase();
           })
           .subscribe();
       } catch (err) {}
@@ -269,24 +277,134 @@ class Store extends EventTarget {
     this.dispatchEvent(new CustomEvent('state-changed', { detail: data }));
   }
 
+  async uploadFoodImage(file, onProgress) {
+    if (!supabase) {
+      throw new Error("Supabase client is not configured or available.");
+    }
+
+    if (!file) {
+      throw new Error("No image file selected.");
+    }
+
+    // Validate file type
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    const fileExt = file.name.split('.').pop().toLowerCase();
+    const validExts = ['jpg', 'jpeg', 'png', 'webp'];
+    
+    if (!allowedTypes.includes(file.type) && !validExts.includes(fileExt)) {
+      throw new Error("Invalid file type. Only JPG, JPEG, PNG, and WebP images are allowed.");
+    }
+
+    // Validate file size (max 5MB)
+    const MAX_SIZE_MB = 5;
+    if (file.size > MAX_SIZE_MB * 1024 * 1024) {
+      throw new Error(`File size is too large (${(file.size / (1024 * 1024)).toFixed(2)}MB). Maximum allowed size is ${MAX_SIZE_MB}MB.`);
+    }
+
+    const uniqueId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const filePath = `items/food_${uniqueId}.${fileExt}`;
+
+    if (onProgress) onProgress(30);
+
+    const { data, error } = await supabase.storage
+      .from('menu-images')
+      .upload(filePath, file, {
+        cacheControl: '3600',
+        upsert: false
+      });
+
+    if (error) {
+      console.error("Supabase Storage Upload Error:", error);
+      throw new Error(error.message || "Failed to upload image to Supabase Storage.");
+    }
+
+    if (onProgress) onProgress(80);
+
+    const { data: publicUrlData } = supabase.storage
+      .from('menu-images')
+      .getPublicUrl(filePath);
+
+    if (onProgress) onProgress(100);
+
+    return publicUrlData.publicUrl;
+  }
+
+  async deleteFoodStorageImage(imageUrl) {
+    if (!supabase || !imageUrl) return;
+    try {
+      if (imageUrl.includes('/storage/v1/object/public/menu-images/')) {
+        const path = imageUrl.split('/storage/v1/object/public/menu-images/')[1];
+        if (path) {
+          await supabase.storage.from('menu-images').remove([path]);
+        }
+      }
+    } catch (err) {
+      console.warn("Could not delete previous storage file:", err);
+    }
+  }
+
+  async fetchMenuItemsFromSupabase() {
+    if (!supabase) return;
+    try {
+      const { data, error } = await supabase.from('menu_items').select('*').order('created_at', { ascending: true });
+      if (!error && data && data.length > 0) {
+        const mapped = data.map(item => ({
+          id: item.id,
+          name: item.name,
+          category: item.category_id || 'chaa',
+          price: Number(item.price),
+          description: item.description || '',
+          image: item.image_url || '',
+          isPopular: item.is_popular || false,
+          inStock: item.in_stock !== false
+        }));
+        localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(mapped));
+        this.notify('menu-updated');
+      }
+    } catch (err) {
+      console.error("Error fetching menu items from Supabase:", err);
+    }
+  }
+
   getMenuItems() {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.MENU)) || INITIAL_MENU_ITEMS; } catch { return INITIAL_MENU_ITEMS; }
   }
 
-  saveMenuItem(item) {
+  async saveMenuItem(item) {
     const items = this.getMenuItems();
-    const existingIdx = items.findIndex(i => i.id === item.id);
+    let savedItem = { ...item };
+    if (!savedItem.id) {
+      savedItem.id = `m_${Date.now()}`;
+    }
+    const existingIdx = items.findIndex(i => i.id === savedItem.id);
     if (existingIdx >= 0) {
-      items[existingIdx] = { ...items[existingIdx], ...item };
+      items[existingIdx] = { ...items[existingIdx], ...savedItem };
     } else {
-      items.unshift({ ...item, id: `m_${Date.now()}` });
+      items.unshift(savedItem);
     }
     localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(items));
     this.notify('menu-updated');
     this.publishCrossDevice('menu-updated', items);
+
+    if (supabase) {
+      try {
+        await supabase.from('menu_items').upsert({
+          id: savedItem.id,
+          name: savedItem.name,
+          category_id: savedItem.category,
+          price: savedItem.price,
+          description: savedItem.description || '',
+          image_url: savedItem.image || '',
+          is_popular: savedItem.isPopular || false,
+          in_stock: savedItem.inStock !== false
+        });
+      } catch (err) {
+        console.error("Supabase menu item upsert error:", err);
+      }
+    }
   }
 
-  toggleStockStatus(id) {
+  async toggleStockStatus(id) {
     const items = this.getMenuItems();
     const item = items.find(i => i.id === id);
     if (item) {
@@ -294,14 +412,32 @@ class Store extends EventTarget {
       localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(items));
       this.notify('menu-updated');
       this.publishCrossDevice('menu-updated', items);
+
+      if (supabase) {
+        try {
+          await supabase.from('menu_items').update({ in_stock: item.inStock }).eq('id', id);
+        } catch (err) {}
+      }
     }
   }
 
-  deleteMenuItem(id) {
-    const items = this.getMenuItems().filter(i => i.id !== id);
-    localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(items));
+  async deleteMenuItem(id) {
+    const items = this.getMenuItems();
+    const itemToDelete = items.find(i => i.id === id);
+    if (itemToDelete && itemToDelete.image) {
+      this.deleteFoodStorageImage(itemToDelete.image);
+    }
+
+    const filtered = items.filter(i => i.id !== id);
+    localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(filtered));
     this.notify('menu-updated');
-    this.publishCrossDevice('menu-updated', items);
+    this.publishCrossDevice('menu-updated', filtered);
+
+    if (supabase) {
+      try {
+        await supabase.from('menu_items').delete().eq('id', id);
+      } catch (err) {}
+    }
   }
 
   getCategories() {

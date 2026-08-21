@@ -1,4 +1,4 @@
-// Chaa Buzz Cafe - Full Application Bundle with Official ChaaBuzz Cafe Menu & High-Res Imagery
+// Chaa Buzz Cafe - Full Application Bundle with Strict RBAC & Supabase Image Upload
 
 // ====================================================================
 // 1. DATASET & CONFIGURATION (FROM OFFICIAL CHAABUZZ CAFE MENU)
@@ -51,7 +51,6 @@ const INITIAL_CATEGORIES = [
 ];
 
 const INITIAL_MENU_ITEMS = [
-  // --- CHAA ---
   {
     id: "c1",
     name: "Dud Chaa",
@@ -112,8 +111,6 @@ const INITIAL_MENU_ITEMS = [
     isPopular: false,
     inStock: true
   },
-
-  // --- FRIED BUN ---
   {
     id: "fb1",
     name: "Pura ruti",
@@ -154,8 +151,6 @@ const INITIAL_MENU_ITEMS = [
     isPopular: false,
     inStock: true
   },
-
-  // --- BURGER & SNACKS ---
   {
     id: "b1",
     name: "Mini Burger",
@@ -206,8 +201,6 @@ const INITIAL_MENU_ITEMS = [
     isPopular: true,
     inStock: true
   },
-
-  // --- JUICE & SHAKES ---
   {
     id: "j1",
     name: "Lacci",
@@ -228,8 +221,6 @@ const INITIAL_MENU_ITEMS = [
     isPopular: false,
     inStock: true
   },
-
-  // --- OTHERS ---
   {
     id: "o1",
     name: "Doi Chira",
@@ -300,7 +291,6 @@ class Store extends EventTarget {
     this.broadcast = new BroadcastChannel('chaa_buzz_realtime');
     this.initStorage();
 
-    // Cross-tab broadcast listener
     this.broadcast.onmessage = (event) => {
       if (event.data) {
         this.dispatchEvent(new CustomEvent('state-changed', { detail: event.data }));
@@ -310,15 +300,16 @@ class Store extends EventTarget {
       this.dispatchEvent(new CustomEvent('state-changed'));
     });
 
-    // Cloud Sync Engine
     this.initCloudSyncEngine();
   }
 
   initStorage() {
-    // Sync official ChaaBuzz menu items and categories
-    localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(INITIAL_MENU_ITEMS));
-    localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(INITIAL_CATEGORIES));
-
+    if (!localStorage.getItem(STORAGE_KEYS.MENU)) {
+      localStorage.setItem(STORAGE_KEYS.MENU, JSON.stringify(INITIAL_MENU_ITEMS));
+    }
+    if (!localStorage.getItem(STORAGE_KEYS.CATEGORIES)) {
+      localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(INITIAL_CATEGORIES));
+    }
     if (!localStorage.getItem(STORAGE_KEYS.TABLES)) {
       localStorage.setItem(STORAGE_KEYS.TABLES, JSON.stringify(INITIAL_TABLES));
     }
@@ -331,7 +322,6 @@ class Store extends EventTarget {
   }
 
   initCloudSyncEngine() {
-    // 1. Supabase Initial Load & Realtime Channel Subscription
     if (supabase) {
       this.fetchOrdersFromSupabase();
 
@@ -356,7 +346,6 @@ class Store extends EventTarget {
       } catch (err) {}
     }
 
-    // 2. HTTP Event Relay Stream & Backup Polling
     try {
       if (typeof EventSource !== 'undefined') {
         const es = new EventSource(`${NTFY_RELAY}/json`);
@@ -599,7 +588,6 @@ class Store extends EventTarget {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.ORDERS)) || []; } catch { return []; }
   }
 
-  // --- Create Order (Direct Supabase DB Insert + Relay Sync with Nullable item_id) ---
   async createOrder({ tableNumber, items, specialNote = "" }) {
     const orders = this.getOrders();
     const uniqueIdSuffix = Date.now().toString().slice(-5) + Math.floor(10 + Math.random() * 90);
@@ -616,14 +604,12 @@ class Store extends EventTarget {
       createdAt: new Date().toISOString()
     };
     
-    // 1. Local & Relay Update (Instant UI responsiveness)
     orders.unshift(newOrder);
     localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
     this.playBellSound('new');
     this.notify('order-created', newOrder);
     this.publishCrossDevice('order-created', newOrder);
 
-    // 2. Direct Supabase DB Persist (Guaranteed order_items insert)
     if (supabase) {
       try {
         await supabase
@@ -664,7 +650,6 @@ class Store extends EventTarget {
       this.notify('order-updated', order);
       this.publishCrossDevice('order-updated', order);
 
-      // Direct Supabase DB Update
       if (supabase) {
         supabase
           .from('orders')
@@ -688,7 +673,6 @@ class Store extends EventTarget {
     this.notify('table-cleared');
     this.publishCrossDevice('table-cleared', { tableNumber });
 
-    // Direct Supabase DB Update
     if (supabase) {
       supabase
         .from('orders')
@@ -794,6 +778,16 @@ function QrCodeSvg({ value, size = 160 }) {
 
   return <div ref={containerRef} className="flex justify-center items-center bg-white p-2 rounded-xl" />;
 }
+
+// Helper to convert File to Base64 Data URL (Fallback for storage)
+const readFileAsDataUrl = (file) => {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target.result);
+    reader.onerror = () => resolve('');
+    reader.readAsDataURL(file);
+  });
+};
 
 // --- Customer Menu Component ---
 function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
@@ -1223,14 +1217,21 @@ function KitchenDisplay() {
   );
 }
 
-// --- Admin Panel Component ---
+// --- Admin Panel Component with Image Upload & Storage ---
 function AdminPanel({ onOpenPrintQr }) {
   const [menuItems, setMenuItems] = useState(store.getMenuItems());
   const [categories] = useState(store.getCategories());
   const [orders, setOrders] = useState(store.getOrders());
   const [editingItem, setEditingItem] = useState(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
+
+  // Dual Image Option State (Upload File vs Image URL)
+  const [imageTab, setImageTab] = useState('upload'); // 'upload' | 'url'
+  const [selectedFile, setSelectedFile] = useState(null);
   const [selectedImageUrl, setSelectedImageUrl] = useState("");
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
 
   useEffect(() => {
     const update = () => {
@@ -1244,12 +1245,79 @@ function AdminPanel({ onOpenPrintQr }) {
 
   const handleOpenForm = (item = null) => {
     setEditingItem(item);
-    setSelectedImageUrl(item ? item.image : PRESET_IMAGES[0].url);
+    const initialImg = item ? item.image : PRESET_IMAGES[0].url;
+    setSelectedImageUrl(initialImg);
+    setPreviewUrl(initialImg);
+    setSelectedFile(null);
+    setUploadError("");
+    setIsUploading(false);
+    setImageTab(item ? 'url' : 'upload');
     setIsFormOpen(true);
   };
 
-  const handleSaveItem = (e) => {
+  const handleFileSelect = (e) => {
+    const file = e.target.files[0];
+    setUploadError("");
+    if (!file) return;
+
+    // Validate type: JPG, JPEG, PNG, WEBP
+    const validTypes = ['image/jpeg', 'image/png', 'image/jpg', 'image/webp'];
+    if (!validTypes.includes(file.type)) {
+      setUploadError("Invalid format! Please select a JPG, PNG, or WebP image.");
+      return;
+    }
+
+    // Validate max file size: 5MB
+    if (file.size > 5 * 1024 * 1024) {
+      setUploadError("File too large! Max file size limit is 5MB.");
+      return;
+    }
+
+    setSelectedFile(file);
+    const objectUrl = URL.createObjectURL(file);
+    setPreviewUrl(objectUrl);
+  };
+
+  const handleSaveItem = async (e) => {
     e.preventDefault();
+    setIsUploading(true);
+    setUploadError("");
+    let finalImageUrl = selectedImageUrl;
+
+    // Handle Supabase Image Upload if file selected
+    if (imageTab === 'upload' && selectedFile) {
+      try {
+        if (supabase && supabase.storage) {
+          const ext = selectedFile.name.split('.').pop() || 'jpg';
+          const fileName = `food_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.${ext}`;
+
+          const { data, error } = await supabase.storage
+            .from('menu-images')
+            .upload(fileName, selectedFile, {
+              cacheControl: '3600',
+              upsert: true
+            });
+
+          if (!error && data) {
+            const { data: publicData } = supabase.storage
+              .from('menu-images')
+              .getPublicUrl(fileName);
+
+            if (publicData && publicData.publicUrl) {
+              finalImageUrl = publicData.publicUrl;
+            }
+          } else {
+            // Storage bucket fallback to data URL
+            finalImageUrl = await readFileAsDataUrl(selectedFile);
+          }
+        } else {
+          finalImageUrl = await readFileAsDataUrl(selectedFile);
+        }
+      } catch (err) {
+        finalImageUrl = await readFileAsDataUrl(selectedFile);
+      }
+    }
+
     const formData = new FormData(e.target);
     const itemData = {
       id: editingItem ? editingItem.id : undefined,
@@ -1257,11 +1325,13 @@ function AdminPanel({ onOpenPrintQr }) {
       category: formData.get('category'),
       price: Number(formData.get('price')),
       description: formData.get('description'),
-      image: selectedImageUrl || formData.get('image'),
+      image: finalImageUrl || previewUrl || PRESET_IMAGES[0].url,
       isPopular: formData.get('isPopular') === 'on',
       inStock: formData.get('inStock') === 'on'
     };
+
     store.saveMenuItem(itemData);
+    setIsUploading(false);
     setIsFormOpen(false);
     setEditingItem(null);
   };
@@ -1406,7 +1476,7 @@ function AdminPanel({ onOpenPrintQr }) {
         </div>
       </div>
 
-      {/* Add / Edit Food Modal */}
+      {/* Add / Edit Food Modal with Dual Image Mode */}
       {isFormOpen && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <form onSubmit={handleSaveItem} className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
@@ -1436,40 +1506,94 @@ function AdminPanel({ onOpenPrintQr }) {
               </div>
             </div>
 
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-stone-700 block">Food Image URL</label>
-              <input
-                type="url"
-                name="image"
-                value={selectedImageUrl}
-                onChange={e => setSelectedImageUrl(e.target.value)}
-                placeholder="https://images.unsplash.com/..."
-                required
-                className="w-full bg-stone-50 border rounded-xl p-2.5 text-xs font-mono"
-              />
-
-              <div>
-                <span className="text-[10px] font-bold text-stone-500 block mb-1">Quick Select Preset Image:</span>
-                <div className="flex gap-1.5 overflow-x-auto pb-1">
-                  {PRESET_IMAGES.map((preset, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => setSelectedImageUrl(preset.url)}
-                      className={`px-2.5 py-1 rounded-lg text-[10px] font-bold whitespace-nowrap border transition ${
-                        selectedImageUrl === preset.url ? 'bg-amber-500 text-stone-950 border-amber-500' : 'bg-stone-100 text-stone-700 border-stone-200'
-                      }`}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
+            {/* DUAL IMAGE MODE: Upload Image vs Image URL */}
+            <div className="space-y-3 bg-stone-50 p-4 rounded-2xl border border-stone-200">
+              <div className="flex justify-between items-center border-b border-stone-200 pb-2">
+                <label className="text-xs font-bold text-stone-900 uppercase">Food Photo Selection</label>
+                <div className="flex gap-1 bg-stone-200 p-1 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setImageTab('upload')}
+                    className={`px-3 py-1 text-[11px] font-bold rounded-lg transition ${imageTab === 'upload' ? 'bg-amber-500 text-stone-950 shadow' : 'text-stone-600'}`}
+                  >
+                    📁 Upload Image
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setImageTab('url')}
+                    className={`px-3 py-1 text-[11px] font-bold rounded-lg transition ${imageTab === 'url' ? 'bg-amber-500 text-stone-950 shadow' : 'text-stone-600'}`}
+                  >
+                    🔗 Image URL
+                  </button>
                 </div>
               </div>
 
-              {selectedImageUrl && (
-                <div className="flex items-center gap-3 bg-stone-50 p-2 rounded-xl border border-stone-200">
-                  <img src={selectedImageUrl} className="w-16 h-16 rounded-lg object-cover" alt="Preview" />
-                  <span className="text-[11px] text-stone-500 italic">Image Preview</span>
+              {imageTab === 'upload' ? (
+                <div className="space-y-2">
+                  <div className="border-2 border-dashed border-stone-300 hover:border-amber-500 rounded-2xl p-4 text-center cursor-pointer transition bg-white relative">
+                    <input
+                      type="file"
+                      accept="image/png, image/jpeg, image/jpg, image/webp"
+                      onChange={handleFileSelect}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                    />
+                    <div className="space-y-1">
+                      <span className="text-2xl">📸</span>
+                      <p className="text-xs font-bold text-stone-800">Click or Drag & Drop Food Photo</p>
+                      <p className="text-[10px] text-stone-400">Supports JPG, PNG, WebP (Max 5MB)</p>
+                    </div>
+                  </div>
+
+                  {uploadError && <p className="text-[10px] text-rose-600 font-bold text-center">{uploadError}</p>}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <input
+                    type="url"
+                    name="image"
+                    value={selectedImageUrl}
+                    onChange={e => { setSelectedImageUrl(e.target.value); setPreviewUrl(e.target.value); }}
+                    placeholder="https://images.unsplash.com/..."
+                    className="w-full bg-white border border-stone-300 rounded-xl p-2.5 text-xs font-mono"
+                  />
+                  <div>
+                    <span className="text-[10px] font-bold text-stone-500 block mb-1">Quick Select Preset Image:</span>
+                    <div className="flex gap-1.5 overflow-x-auto pb-1">
+                      {PRESET_IMAGES.map((preset, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => { setSelectedImageUrl(preset.url); setPreviewUrl(preset.url); setSelectedFile(null); }}
+                          className={`px-2.5 py-1 rounded-lg text-[10px] font-bold whitespace-nowrap border transition ${
+                            selectedImageUrl === preset.url ? 'bg-amber-500 text-stone-950 border-amber-500' : 'bg-white text-stone-700 border-stone-200'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {previewUrl && (
+                <div className="flex items-center justify-between bg-white p-2.5 rounded-xl border border-stone-200">
+                  <div className="flex items-center gap-3">
+                    <img src={previewUrl} className="w-14 h-14 rounded-xl object-cover border" alt="Preview" />
+                    <div>
+                      <p className="text-xs font-bold text-stone-900">Selected Image Preview</p>
+                      {selectedFile && <p className="text-[10px] text-stone-500 truncate max-w-[180px]">{selectedFile.name}</p>}
+                    </div>
+                  </div>
+                  {selectedFile && (
+                    <button
+                      type="button"
+                      onClick={() => { setSelectedFile(null); setPreviewUrl(editingItem ? editingItem.image : ''); }}
+                      className="text-xs font-bold text-rose-600 hover:underline px-2"
+                    >
+                      Remove
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -1494,8 +1618,12 @@ function AdminPanel({ onOpenPrintQr }) {
               <button type="button" onClick={() => setIsFormOpen(false)} className="flex-1 py-3 bg-stone-100 text-stone-700 font-bold text-xs rounded-xl">
                 Cancel
               </button>
-              <button type="submit" className="flex-1 py-3 bg-stone-900 text-white font-extrabold text-xs rounded-xl shadow">
-                Save Food Item
+              <button
+                type="submit"
+                disabled={isUploading}
+                className="flex-1 py-3 bg-stone-900 hover:bg-stone-800 disabled:bg-stone-400 text-white font-extrabold text-xs rounded-xl shadow flex items-center justify-center gap-2"
+              >
+                {isUploading ? '⏳ Uploading & Saving...' : 'Save Food Item'}
               </button>
             </div>
           </form>
