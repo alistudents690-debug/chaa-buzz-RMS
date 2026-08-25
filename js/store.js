@@ -68,7 +68,7 @@ class Store extends EventTarget {
               const idx = orders.findIndex(o => o.id === payload.new.id);
               if (idx >= 0) {
                 orders[idx].status = payload.new.status;
-                if (payload.new.payment_status) {
+                if (payload.new.payment_status !== undefined && payload.new.payment_status !== null) {
                   orders[idx].paymentStatus = payload.new.payment_status;
                 }
                 localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
@@ -126,7 +126,10 @@ class Store extends EventTarget {
     if (!supabase) return;
     try {
       const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      const { data: dbOrders, error } = await supabase
+      let dbOrders = null;
+      let error = null;
+
+      const res1 = await supabase
         .from('orders')
         .select(`
           id,
@@ -147,6 +150,33 @@ class Store extends EventTarget {
         .order('created_at', { ascending: false })
         .limit(100);
 
+      if (res1.error) {
+        const res2 = await supabase
+          .from('orders')
+          .select(`
+            id,
+            table_number,
+            total_amount,
+            special_note,
+            status,
+            created_at,
+            order_items (
+              name,
+              price,
+              quantity,
+              note
+            )
+          `)
+          .gte('created_at', twentyFourHoursAgo)
+          .order('created_at', { ascending: false })
+          .limit(100);
+
+        dbOrders = res2.data;
+        error = res2.error;
+      } else {
+        dbOrders = res1.data;
+      }
+
       if (!error && dbOrders) {
         const existingOrders = this.getOrders();
         const mapped = dbOrders.map(o => {
@@ -158,13 +188,17 @@ class Store extends EventTarget {
             note: i.note || ''
           }));
 
+          const persistentPaymentStatus = (o.payment_status !== undefined && o.payment_status !== null)
+            ? o.payment_status
+            : (existing && existing.paymentStatus ? existing.paymentStatus : 'unpaid');
+
           return {
             id: o.id,
             tableNumber: o.table_number,
             totalAmount: Number(o.total_amount),
             specialNote: o.special_note || '',
             status: o.status,
-            paymentStatus: o.payment_status || 'unpaid',
+            paymentStatus: persistentPaymentStatus,
             createdAt: o.created_at,
             items: fetchedItems.length > 0 ? fetchedItems : (existing ? existing.items : [])
           };
@@ -210,13 +244,17 @@ class Store extends EventTarget {
         }));
 
         const existingOrder = this.getOrders().find(ord => ord.id === o.id);
+        const persistentPaymentStatus = (o.payment_status !== undefined && o.payment_status !== null)
+          ? o.payment_status
+          : (existingOrder && existingOrder.paymentStatus ? existingOrder.paymentStatus : 'unpaid');
+
         const mappedOrder = {
           id: o.id,
           tableNumber: o.table_number,
           totalAmount: Number(o.total_amount),
           specialNote: o.special_note || '',
           status: o.status,
-          paymentStatus: o.payment_status || 'unpaid',
+          paymentStatus: persistentPaymentStatus,
           createdAt: o.created_at,
           items: fetchedItems.length > 0 ? fetchedItems : (existingOrder ? existingOrder.items : [])
         };
@@ -250,13 +288,21 @@ class Store extends EventTarget {
       this.notify('order-created', payload.data);
     } else if (payload.type === 'order-updated') {
       const orders = this.getOrders();
-      const idx = orders.findIndex(o => o.id === payload.data.id);
-      if (idx >= 0) {
-        orders[idx] = { ...orders[idx], ...payload.data };
-        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-        if (payload.data.status === 'ready') this.playBellSound('ready', payload.data.id);
-        this.notify('order-updated', orders[idx]);
+      if (payload.data.tableNumber && payload.data.paymentStatus) {
+        orders.forEach(o => {
+          if (Number(o.tableNumber) === Number(payload.data.tableNumber) && o.status !== 'completed') {
+            o.paymentStatus = payload.data.paymentStatus;
+          }
+        });
+      } else if (payload.data.id) {
+        const idx = orders.findIndex(o => o.id === payload.data.id);
+        if (idx >= 0) {
+          orders[idx] = { ...orders[idx], ...payload.data };
+        }
       }
+      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+      if (payload.data.status === 'ready') this.playBellSound('ready', payload.data.id);
+      this.notify('order-updated', payload.data);
     } else if (payload.type === 'table-cleared') {
       const orders = this.getOrders().map(o => {
         if (Number(o.tableNumber) === Number(payload.data.tableNumber) && o.status !== 'completed') {
@@ -442,7 +488,7 @@ class Store extends EventTarget {
           .update({ payment_status: paymentStatus, updated_at: new Date().toISOString() })
           .eq('id', orderId)
           .then(({ error }) => {
-            if (error) console.error("Supabase payment status error:", error);
+            if (error) console.error("Supabase payment status update error:", error);
           });
       }
     }
@@ -459,8 +505,8 @@ class Store extends EventTarget {
     });
     if (count > 0) {
       localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-      this.notify('orders-loaded');
-      this.publishCrossDevice('menu-updated', orders);
+      this.notify('order-updated', { tableNumber, paymentStatus });
+      this.publishCrossDevice('order-updated', { tableNumber, paymentStatus });
 
       if (supabase) {
         supabase

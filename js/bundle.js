@@ -1,4 +1,4 @@
-// Chaa Buzz Cafe - Full Application Bundle with Table Bill Calculator, Paid/Unpaid System, 4-Person Table Limit & Sound Deduplication
+// Chaa Buzz Cafe - Full Application Bundle with Guaranteed Persistent Payment Status (Paid/Unpaid) Protection
 
 // ====================================================================
 // 1. DATASET & CONFIGURATION (FROM OFFICIAL CHAABUZZ CAFE MENU)
@@ -305,7 +305,7 @@ class Store extends EventTarget {
   constructor() {
     super();
     this.broadcast = new BroadcastChannel('chaa_buzz_realtime');
-    this.playedSoundSet = new Set(); // Track played sound IDs to prevent duplicate sound triggers
+    this.playedSoundSet = new Set();
     this.initStorage();
 
     this.broadcast.onmessage = (event) => {
@@ -353,7 +353,7 @@ class Store extends EventTarget {
               const idx = orders.findIndex(o => o.id === payload.new.id);
               if (idx >= 0) {
                 orders[idx].status = payload.new.status;
-                if (payload.new.payment_status) {
+                if (payload.new.payment_status !== undefined && payload.new.payment_status !== null) {
                   orders[idx].paymentStatus = payload.new.payment_status;
                 }
                 localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
@@ -383,7 +383,6 @@ class Store extends EventTarget {
       }
     } catch (e) {}
 
-    // Backup HTTP polling executed every 15s to conserve network bandwidth & battery
     const runCloudSync = async () => {
       try {
         const res = await fetch(`${NTFY_RELAY}/json?poll=1`);
@@ -412,7 +411,11 @@ class Store extends EventTarget {
     if (!supabase) return;
     try {
       const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      const { data: dbOrders, error } = await supabase
+      let dbOrders = null;
+      let error = null;
+
+      // Attempt select with payment_status column first
+      const res1 = await supabase
         .from('orders')
         .select(`
           id,
@@ -433,6 +436,34 @@ class Store extends EventTarget {
         .order('created_at', { ascending: false })
         .limit(100);
 
+      if (res1.error) {
+        // Fallback select if payment_status column doesn't exist in DB yet
+        const res2 = await supabase
+          .from('orders')
+          .select(`
+            id,
+            table_number,
+            total_amount,
+            special_note,
+            status,
+            created_at,
+            order_items (
+              name,
+              price,
+              quantity,
+              note
+            )
+          `)
+          .gte('created_at', twentyFourHoursAgo)
+          .order('created_at', { ascending: false })
+          .limit(100);
+
+        dbOrders = res2.data;
+        error = res2.error;
+      } else {
+        dbOrders = res1.data;
+      }
+
       if (!error && dbOrders) {
         const existingOrders = this.getOrders();
         const mapped = dbOrders.map(o => {
@@ -444,13 +475,18 @@ class Store extends EventTarget {
             note: i.note || ''
           }));
 
+          // PRESERVE local paymentStatus if o.payment_status is undefined from DB!
+          const persistentPaymentStatus = (o.payment_status !== undefined && o.payment_status !== null)
+            ? o.payment_status
+            : (existing && existing.paymentStatus ? existing.paymentStatus : 'unpaid');
+
           return {
             id: o.id,
             tableNumber: o.table_number,
             totalAmount: Number(o.total_amount),
             specialNote: o.special_note || '',
             status: o.status,
-            paymentStatus: o.payment_status || 'unpaid',
+            paymentStatus: persistentPaymentStatus,
             createdAt: o.created_at,
             items: fetchedItems.length > 0 ? fetchedItems : (existing ? existing.items : [])
           };
@@ -496,13 +532,17 @@ class Store extends EventTarget {
         }));
 
         const existingOrder = this.getOrders().find(ord => ord.id === o.id);
+        const persistentPaymentStatus = (o.payment_status !== undefined && o.payment_status !== null)
+          ? o.payment_status
+          : (existingOrder && existingOrder.paymentStatus ? existingOrder.paymentStatus : 'unpaid');
+
         const mappedOrder = {
           id: o.id,
           tableNumber: o.table_number,
           totalAmount: Number(o.total_amount),
           specialNote: o.special_note || '',
           status: o.status,
-          paymentStatus: o.payment_status || 'unpaid',
+          paymentStatus: persistentPaymentStatus,
           createdAt: o.created_at,
           items: fetchedItems.length > 0 ? fetchedItems : (existingOrder ? existingOrder.items : [])
         };
@@ -532,17 +572,26 @@ class Store extends EventTarget {
         orders.unshift(payload.data);
       }
       localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-      this.playBellSound('new', payload.data.id); // Deduplicated Sound Call
+      this.playBellSound('new', payload.data.id);
       this.notify('order-created', payload.data);
     } else if (payload.type === 'order-updated') {
       const orders = this.getOrders();
-      const idx = orders.findIndex(o => o.id === payload.data.id);
-      if (idx >= 0) {
-        orders[idx] = { ...orders[idx], ...payload.data };
-        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-        if (payload.data.status === 'ready') this.playBellSound('ready', payload.data.id);
-        this.notify('order-updated', orders[idx]);
+      if (payload.data.tableNumber && payload.data.paymentStatus) {
+        // Table-wide payment update sync
+        orders.forEach(o => {
+          if (Number(o.tableNumber) === Number(payload.data.tableNumber) && o.status !== 'completed') {
+            o.paymentStatus = payload.data.paymentStatus;
+          }
+        });
+      } else if (payload.data.id) {
+        const idx = orders.findIndex(o => o.id === payload.data.id);
+        if (idx >= 0) {
+          orders[idx] = { ...orders[idx], ...payload.data };
+        }
       }
+      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+      if (payload.data.status === 'ready') this.playBellSound('ready', payload.data.id);
+      this.notify('order-updated', payload.data);
     } else if (payload.type === 'table-cleared') {
       const orders = this.getOrders().map(o => {
         if (Number(o.tableNumber) === Number(payload.data.tableNumber) && o.status !== 'completed') {
@@ -643,14 +692,12 @@ class Store extends EventTarget {
       createdAt: new Date().toISOString()
     };
     
-    // 1. Local & Relay Update
     orders.unshift(newOrder);
     localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-    this.playBellSound('new', newOrderId); // Play sound ONCE locally
+    this.playBellSound('new', newOrderId);
     this.notify('order-created', newOrder);
     this.publishCrossDevice('order-created', newOrder);
 
-    // 2. Direct Supabase DB Persist
     if (supabase) {
       try {
         await supabase
@@ -733,7 +780,7 @@ class Store extends EventTarget {
           .update({ payment_status: paymentStatus, updated_at: new Date().toISOString() })
           .eq('id', orderId)
           .then(({ error }) => {
-            if (error) console.error("Supabase payment status error:", error);
+            if (error) console.error("Supabase payment status update error:", error);
           });
       }
     }
@@ -751,8 +798,8 @@ class Store extends EventTarget {
     });
     if (count > 0) {
       localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-      this.notify('orders-loaded');
-      this.publishCrossDevice('menu-updated', orders);
+      this.notify('order-updated', { tableNumber, paymentStatus });
+      this.publishCrossDevice('order-updated', { tableNumber, paymentStatus });
 
       if (supabase) {
         supabase
@@ -836,7 +883,7 @@ class Store extends EventTarget {
     if (orderId) {
       const soundKey = `${orderId}_${type}`;
       if (this.playedSoundSet.has(soundKey)) {
-        return; // EXACTLY ONE sound per order - skip duplicate audio trigger
+        return;
       }
       this.playedSoundSet.add(soundKey);
       if (this.playedSoundSet.size > 200) {
@@ -1226,7 +1273,7 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
   );
 }
 
-// --- Waiter Dashboard Component with Automatic Table Bill Calculator & Payment Status ---
+// --- Waiter Dashboard Component ---
 function WaiterDashboard() {
   const [tables, setTables] = useState(store.getTables());
   const [orders, setOrders] = useState(store.getOrders());
@@ -1243,7 +1290,6 @@ function WaiterDashboard() {
 
   const activeOrders = orders.filter(o => o.status !== 'completed');
 
-  // Group active orders by table number for automatic table bill calculation
   const tableBillsMap = useMemo(() => {
     const map = {};
     activeOrders.forEach(o => {
@@ -1284,7 +1330,6 @@ function WaiterDashboard() {
         </button>
       </div>
 
-      {/* Floor Map with Automatic Table Bill Summary */}
       <div className="bg-white p-6 rounded-3xl shadow-sm border">
         <h2 className="text-xs font-bold uppercase text-stone-500 mb-4">Floor Map & Active Table Bills (16 Tables)</h2>
         <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-8 gap-3">
@@ -1325,7 +1370,6 @@ function WaiterDashboard() {
         </div>
       </div>
 
-      {/* AUTOMATIC TABLE BILL SUMMARY & INDIVIDUAL ORDER BREAKDOWN */}
       <div className="bg-white p-6 rounded-3xl shadow-sm border space-y-4">
         <div className="flex justify-between items-center">
           <h2 className="text-xs font-bold uppercase text-stone-500">Active Tables & Bill Calculator ({Object.keys(tableBillsMap).length} Active Tables)</h2>
@@ -1338,7 +1382,6 @@ function WaiterDashboard() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {Object.values(tableBillsMap).map(tb => (
               <div key={tb.tableNumber} className="bg-stone-50 p-5 rounded-3xl border border-stone-200 space-y-4 shadow-sm">
-                {/* Table Total Header */}
                 <div className="flex justify-between items-center border-b border-stone-200 pb-3">
                   <div>
                     <h3 className="text-lg font-black text-stone-900">Table {tb.tableNumber}</h3>
@@ -1356,7 +1399,6 @@ function WaiterDashboard() {
                   </div>
                 </div>
 
-                {/* Individual Order Breakdown */}
                 <div className="space-y-2">
                   <span className="text-[10px] font-bold text-stone-400 uppercase tracking-wider block">Individual Orders Breakdown:</span>
                   {tb.orders.map(ord => (
@@ -1503,7 +1545,7 @@ function KitchenDisplay() {
   );
 }
 
-// --- Admin Panel Component with Table Bill Calculator & Paid/Unpaid Authority ---
+// --- Admin Panel Component ---
 function AdminPanel({ onOpenPrintQr }) {
   const [menuItems, setMenuItems] = useState(store.getMenuItems());
   const [categories] = useState(store.getCategories());
@@ -1511,7 +1553,6 @@ function AdminPanel({ onOpenPrintQr }) {
   const [editingItem, setEditingItem] = useState(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
 
-  // Dual Image Option State (Upload File vs Image URL)
   const [imageTab, setImageTab] = useState('upload');
   const [selectedFile, setSelectedFile] = useState(null);
   const [selectedImageUrl, setSelectedImageUrl] = useState("");
@@ -1531,7 +1572,6 @@ function AdminPanel({ onOpenPrintQr }) {
 
   const activeOrders = orders.filter(o => o.status !== 'completed');
 
-  // Calculate table bills for Admin
   const adminTableBillsMap = useMemo(() => {
     const map = {};
     activeOrders.forEach(o => {
@@ -2158,7 +2198,6 @@ function App() {
     setAuthenticatedStaffRole(null);
   };
 
-  // STRICT ROUTE GUARD: Effective role is governed strictly by passcode authentication
   const currentRole = authenticatedStaffRole || "customer";
 
   return (
