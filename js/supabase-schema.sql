@@ -1,6 +1,6 @@
 -- ================================================================
 -- CHAA BUZZ CAFE - PRODUCTION SUPABASE POSTGRESQL SCHEMA
--- INCLUDES: RLS POLICIES, PERFORMANCE INDEXES, SECURE RPC & 4-PERSON TABLE CAPACITY
+-- INCLUDES: RLS POLICIES, PERFORMANCE INDEXES, SECURE RPC, 4-PERSON TABLE CAPACITY & PAYMENT STATUS
 -- ================================================================
 
 -- 1. Create Categories Table
@@ -31,16 +31,30 @@ CREATE TABLE IF NOT EXISTS public.cafe_tables (
     status TEXT DEFAULT 'available'
 );
 
--- 4. Create Orders Table
+-- 4. Create Orders Table with Payment Status
 CREATE TABLE IF NOT EXISTS public.orders (
     id TEXT PRIMARY KEY,
     table_number INT NOT NULL,
     total_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
     special_note TEXT DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending',
+    payment_status TEXT NOT NULL DEFAULT 'unpaid',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Safely add payment_status column if table already exists
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+          AND table_name = 'orders' 
+          AND column_name = 'payment_status'
+    ) THEN
+        ALTER TABLE public.orders ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'unpaid';
+    END IF;
+END $$;
 
 -- 5. Create Order Items Table
 CREATE TABLE IF NOT EXISTS public.order_items (
@@ -69,6 +83,7 @@ CREATE TABLE IF NOT EXISTS public.table_sessions (
 -- 7. PERFORMANCE INDEXES
 -- ================================================================
 CREATE INDEX IF NOT EXISTS idx_orders_status ON public.orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_payment_status ON public.orders(payment_status);
 CREATE INDEX IF NOT EXISTS idx_orders_created_at ON public.orders(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_table_number ON public.orders(table_number);
 CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON public.order_items(order_id);
@@ -86,7 +101,6 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
 BEGIN
-    -- Validate staff passcodes (6002 for Admin, 1210 for Chef, 9100 for Waiter)
     IF p_passcode NOT IN ('6002', '1210', '9100') THEN
         RAISE EXCEPTION 'Unauthorized: Invalid staff passcode';
     END IF;
@@ -118,14 +132,12 @@ DECLARE
 BEGIN
     v_cutoff := NOW() - (p_timeout_minutes || ' minutes')::INTERVAL;
 
-    -- Expire old inactive sessions for this table
     UPDATE public.table_sessions
     SET status = 'expired'
     WHERE table_number = p_table_number
       AND status = 'active'
       AND last_active_at < v_cutoff;
 
-    -- Check if THIS customer session already exists & is active
     SELECT * INTO v_existing_session
     FROM public.table_sessions
     WHERE table_number = p_table_number
@@ -133,12 +145,10 @@ BEGIN
       AND status = 'active';
 
     IF FOUND THEN
-        -- Touch last_active_at timestamp to keep session alive
         UPDATE public.table_sessions
         SET last_active_at = NOW()
         WHERE id = v_existing_session.id;
 
-        -- Count current active sessions
         SELECT COUNT(*) INTO v_active_count
         FROM public.table_sessions
         WHERE table_number = p_table_number
@@ -153,16 +163,13 @@ BEGIN
         );
     END IF;
 
-    -- LOCK table rows for concurrency safety
     PERFORM pg_advisory_xact_lock(p_table_number);
 
-    -- Count active unexpired sessions for this table
     SELECT COUNT(*) INTO v_active_count
     FROM public.table_sessions
     WHERE table_number = p_table_number
       AND status = 'active';
 
-    -- Check if table is full (4/4)
     IF v_active_count >= p_max_capacity THEN
         RETURN jsonb_build_object(
             'success', true,
@@ -173,7 +180,6 @@ BEGIN
         );
     END IF;
 
-    -- Insert new active customer session
     INSERT INTO public.table_sessions (table_number, session_id, status, created_at, last_active_at)
     VALUES (p_table_number, p_session_id, 'active', NOW(), NOW())
     ON CONFLICT (table_number, session_id) 
@@ -194,7 +200,6 @@ BEGIN
 END;
 $$;
 
--- Function to Reset/Clear Table Customer Sessions
 CREATE OR REPLACE FUNCTION public.clear_table_sessions(
     p_table_number INT
 ) RETURNS BOOLEAN
@@ -221,7 +226,6 @@ ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.order_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.table_sessions ENABLE ROW LEVEL SECURITY;
 
--- Categories & Menu Items: Public Read-Only, Admin Write
 DROP POLICY IF EXISTS "Public Read Categories" ON public.categories;
 CREATE POLICY "Public Read Categories" ON public.categories FOR SELECT USING (true);
 
@@ -234,7 +238,6 @@ CREATE POLICY "Public Insert Menu Items" ON public.menu_items FOR INSERT WITH CH
 DROP POLICY IF EXISTS "Public Update Menu Items" ON public.menu_items;
 CREATE POLICY "Public Update Menu Items" ON public.menu_items FOR UPDATE USING (true) WITH CHECK (true);
 
--- Orders: Public Read & Insert
 DROP POLICY IF EXISTS "Public Insert Orders" ON public.orders;
 CREATE POLICY "Public Insert Orders" ON public.orders FOR INSERT WITH CHECK (true);
 
@@ -244,14 +247,12 @@ CREATE POLICY "Public Read Orders" ON public.orders FOR SELECT USING (true);
 DROP POLICY IF EXISTS "Public Update Orders" ON public.orders;
 CREATE POLICY "Public Update Orders" ON public.orders FOR UPDATE USING (true) WITH CHECK (true);
 
--- Order Items: Public Read & Insert
 DROP POLICY IF EXISTS "Public Insert Order Items" ON public.order_items;
 CREATE POLICY "Public Insert Order Items" ON public.order_items FOR INSERT WITH CHECK (true);
 
 DROP POLICY IF EXISTS "Public Read Order Items" ON public.order_items;
 CREATE POLICY "Public Read Order Items" ON public.order_items FOR SELECT USING (true);
 
--- Table Sessions: Public Full Access
 DROP POLICY IF EXISTS "Public Read Table Sessions" ON public.table_sessions;
 CREATE POLICY "Public Read Table Sessions" ON public.table_sessions FOR SELECT USING (true);
 

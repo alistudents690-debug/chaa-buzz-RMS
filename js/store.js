@@ -20,6 +20,7 @@ class Store extends EventTarget {
   constructor() {
     super();
     this.broadcast = new BroadcastChannel('chaa_buzz_realtime');
+    this.playedSoundSet = new Set();
     this.initStorage();
 
     this.broadcast.onmessage = (event) => {
@@ -67,8 +68,11 @@ class Store extends EventTarget {
               const idx = orders.findIndex(o => o.id === payload.new.id);
               if (idx >= 0) {
                 orders[idx].status = payload.new.status;
+                if (payload.new.payment_status) {
+                  orders[idx].paymentStatus = payload.new.payment_status;
+                }
                 localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-                if (payload.new.status === 'ready') this.playBellSound('ready');
+                if (payload.new.status === 'ready') this.playBellSound('ready', payload.new.id);
                 this.notify('order-updated', orders[idx]);
               }
             }
@@ -94,7 +98,6 @@ class Store extends EventTarget {
       }
     } catch (e) {}
 
-    // Backup HTTP polling executed every 15s to conserve network bandwidth & battery
     const runCloudSync = async () => {
       try {
         const res = await fetch(`${NTFY_RELAY}/json?poll=1`);
@@ -131,6 +134,7 @@ class Store extends EventTarget {
           total_amount,
           special_note,
           status,
+          payment_status,
           created_at,
           order_items (
             name,
@@ -160,6 +164,7 @@ class Store extends EventTarget {
             totalAmount: Number(o.total_amount),
             specialNote: o.special_note || '',
             status: o.status,
+            paymentStatus: o.payment_status || 'unpaid',
             createdAt: o.created_at,
             items: fetchedItems.length > 0 ? fetchedItems : (existing ? existing.items : [])
           };
@@ -184,6 +189,7 @@ class Store extends EventTarget {
           total_amount,
           special_note,
           status,
+          payment_status,
           created_at,
           order_items (
             name,
@@ -210,6 +216,7 @@ class Store extends EventTarget {
           totalAmount: Number(o.total_amount),
           specialNote: o.special_note || '',
           status: o.status,
+          paymentStatus: o.payment_status || 'unpaid',
           createdAt: o.created_at,
           items: fetchedItems.length > 0 ? fetchedItems : (existingOrder ? existingOrder.items : [])
         };
@@ -231,6 +238,7 @@ class Store extends EventTarget {
       const idx = orders.findIndex(o => o.id === payload.data.id);
       if (idx >= 0) {
         orders[idx].status = payload.data.status || orders[idx].status;
+        if (payload.data.paymentStatus) orders[idx].paymentStatus = payload.data.paymentStatus;
         if (payload.data.items && payload.data.items.length > 0) {
           orders[idx].items = payload.data.items;
         }
@@ -238,7 +246,7 @@ class Store extends EventTarget {
         orders.unshift(payload.data);
       }
       localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-      this.playBellSound('new');
+      this.playBellSound('new', payload.data.id);
       this.notify('order-created', payload.data);
     } else if (payload.type === 'order-updated') {
       const orders = this.getOrders();
@@ -246,7 +254,7 @@ class Store extends EventTarget {
       if (idx >= 0) {
         orders[idx] = { ...orders[idx], ...payload.data };
         localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-        if (payload.data.status === 'ready') this.playBellSound('ready');
+        if (payload.data.status === 'ready') this.playBellSound('ready', payload.data.id);
         this.notify('order-updated', orders[idx]);
       }
     } else if (payload.type === 'table-cleared') {
@@ -344,12 +352,13 @@ class Store extends EventTarget {
       totalAmount,
       specialNote,
       status: 'pending',
+      paymentStatus: 'unpaid',
       createdAt: new Date().toISOString()
     };
     
     orders.unshift(newOrder);
     localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-    this.playBellSound('new');
+    this.playBellSound('new', newOrderId);
     this.notify('order-created', newOrder);
     this.publishCrossDevice('order-created', newOrder);
 
@@ -362,7 +371,8 @@ class Store extends EventTarget {
             table_number: Number(tableNumber),
             total_amount: totalAmount,
             special_note: specialNote || '',
-            status: 'pending'
+            status: 'pending',
+            payment_status: 'unpaid'
           }]);
 
         const orderItemsPayload = items.map(item => ({
@@ -391,7 +401,7 @@ class Store extends EventTarget {
     if (order) {
       order.status = status;
       localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-      if (status === 'ready') this.playBellSound('ready');
+      if (status === 'ready') this.playBellSound('ready', orderId);
       this.notify('order-updated', order);
       this.publishCrossDevice('order-updated', order);
 
@@ -417,6 +427,54 @@ class Store extends EventTarget {
     }
   }
 
+  updatePaymentStatus(orderId, paymentStatus) {
+    const orders = this.getOrders();
+    const order = orders.find(o => o.id === orderId);
+    if (order) {
+      order.paymentStatus = paymentStatus;
+      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+      this.notify('order-updated', order);
+      this.publishCrossDevice('order-updated', order);
+
+      if (supabase) {
+        supabase
+          .from('orders')
+          .update({ payment_status: paymentStatus, updated_at: new Date().toISOString() })
+          .eq('id', orderId)
+          .then(({ error }) => {
+            if (error) console.error("Supabase payment status error:", error);
+          });
+      }
+    }
+  }
+
+  updateTablePaymentStatus(tableNumber, paymentStatus) {
+    const orders = this.getOrders();
+    let count = 0;
+    orders.forEach(o => {
+      if (Number(o.tableNumber) === Number(tableNumber) && o.status !== 'completed') {
+        o.paymentStatus = paymentStatus;
+        count++;
+      }
+    });
+    if (count > 0) {
+      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
+      this.notify('orders-loaded');
+      this.publishCrossDevice('menu-updated', orders);
+
+      if (supabase) {
+        supabase
+          .from('orders')
+          .update({ payment_status: paymentStatus, updated_at: new Date().toISOString() })
+          .eq('table_number', Number(tableNumber))
+          .neq('status', 'completed')
+          .then(({ error }) => {
+            if (error) console.error("Supabase table payment status error:", error);
+          });
+      }
+    }
+  }
+
   clearTable(tableNumber, passcode = '') {
     const orders = this.getOrders().map(o => {
       if (Number(o.tableNumber) === Number(tableNumber) && o.status !== 'completed') {
@@ -437,6 +495,10 @@ class Store extends EventTarget {
         .then(({ error }) => {
           if (error) console.error("Supabase table clear error:", error);
         });
+
+      supabase
+        .rpc('clear_table_sessions', { p_table_number: Number(tableNumber) })
+        .catch(() => {});
     }
   }
 
@@ -477,7 +539,19 @@ class Store extends EventTarget {
     this.setCart([]);
   }
 
-  playBellSound(type = 'new') {
+  playBellSound(type = 'new', orderId = null) {
+    if (orderId) {
+      const soundKey = `${orderId}_${type}`;
+      if (this.playedSoundSet.has(soundKey)) {
+        return;
+      }
+      this.playedSoundSet.add(soundKey);
+      if (this.playedSoundSet.size > 200) {
+        const firstItem = this.playedSoundSet.values().next().value;
+        this.playedSoundSet.delete(firstItem);
+      }
+    }
+
     try {
       const AudioContext = window.AudioContext || window.webkitAudioContext;
       if (!AudioContext) return;
