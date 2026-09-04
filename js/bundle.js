@@ -1,4 +1,4 @@
-// Chaa Buzz Cafe - Full Application Bundle with Guaranteed Persistent Payment Status (Paid/Unpaid) Protection
+// Chaa Buzz Cafe - Full Application Bundle with Automatic Table Bill Calculator, 4-Person Capacity & Sound Deduplication
 
 // ====================================================================
 // 1. DATASET & CONFIGURATION (FROM OFFICIAL CHAABUZZ CAFE MENU)
@@ -353,9 +353,6 @@ class Store extends EventTarget {
               const idx = orders.findIndex(o => o.id === payload.new.id);
               if (idx >= 0) {
                 orders[idx].status = payload.new.status;
-                if (payload.new.payment_status !== undefined && payload.new.payment_status !== null) {
-                  orders[idx].paymentStatus = payload.new.payment_status;
-                }
                 localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
                 if (payload.new.status === 'ready') this.playBellSound('ready', payload.new.id);
                 this.notify('order-updated', orders[idx]);
@@ -411,11 +408,7 @@ class Store extends EventTarget {
     if (!supabase) return;
     try {
       const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      let dbOrders = null;
-      let error = null;
-
-      // Attempt select with payment_status column first
-      const res1 = await supabase
+      const { data: dbOrders, error } = await supabase
         .from('orders')
         .select(`
           id,
@@ -423,7 +416,6 @@ class Store extends EventTarget {
           total_amount,
           special_note,
           status,
-          payment_status,
           created_at,
           order_items (
             name,
@@ -436,34 +428,6 @@ class Store extends EventTarget {
         .order('created_at', { ascending: false })
         .limit(100);
 
-      if (res1.error) {
-        // Fallback select if payment_status column doesn't exist in DB yet
-        const res2 = await supabase
-          .from('orders')
-          .select(`
-            id,
-            table_number,
-            total_amount,
-            special_note,
-            status,
-            created_at,
-            order_items (
-              name,
-              price,
-              quantity,
-              note
-            )
-          `)
-          .gte('created_at', twentyFourHoursAgo)
-          .order('created_at', { ascending: false })
-          .limit(100);
-
-        dbOrders = res2.data;
-        error = res2.error;
-      } else {
-        dbOrders = res1.data;
-      }
-
       if (!error && dbOrders) {
         const existingOrders = this.getOrders();
         const mapped = dbOrders.map(o => {
@@ -475,18 +439,12 @@ class Store extends EventTarget {
             note: i.note || ''
           }));
 
-          // PRESERVE local paymentStatus if o.payment_status is undefined from DB!
-          const persistentPaymentStatus = (o.payment_status !== undefined && o.payment_status !== null)
-            ? o.payment_status
-            : (existing && existing.paymentStatus ? existing.paymentStatus : 'unpaid');
-
           return {
             id: o.id,
             tableNumber: o.table_number,
             totalAmount: Number(o.total_amount),
             specialNote: o.special_note || '',
             status: o.status,
-            paymentStatus: persistentPaymentStatus,
             createdAt: o.created_at,
             items: fetchedItems.length > 0 ? fetchedItems : (existing ? existing.items : [])
           };
@@ -511,7 +469,6 @@ class Store extends EventTarget {
           total_amount,
           special_note,
           status,
-          payment_status,
           created_at,
           order_items (
             name,
@@ -532,17 +489,12 @@ class Store extends EventTarget {
         }));
 
         const existingOrder = this.getOrders().find(ord => ord.id === o.id);
-        const persistentPaymentStatus = (o.payment_status !== undefined && o.payment_status !== null)
-          ? o.payment_status
-          : (existingOrder && existingOrder.paymentStatus ? existingOrder.paymentStatus : 'unpaid');
-
         const mappedOrder = {
           id: o.id,
           tableNumber: o.table_number,
           totalAmount: Number(o.total_amount),
           specialNote: o.special_note || '',
           status: o.status,
-          paymentStatus: persistentPaymentStatus,
           createdAt: o.created_at,
           items: fetchedItems.length > 0 ? fetchedItems : (existingOrder ? existingOrder.items : [])
         };
@@ -564,7 +516,6 @@ class Store extends EventTarget {
       const idx = orders.findIndex(o => o.id === payload.data.id);
       if (idx >= 0) {
         orders[idx].status = payload.data.status || orders[idx].status;
-        if (payload.data.paymentStatus) orders[idx].paymentStatus = payload.data.paymentStatus;
         if (payload.data.items && payload.data.items.length > 0) {
           orders[idx].items = payload.data.items;
         }
@@ -576,14 +527,7 @@ class Store extends EventTarget {
       this.notify('order-created', payload.data);
     } else if (payload.type === 'order-updated') {
       const orders = this.getOrders();
-      if (payload.data.tableNumber && payload.data.paymentStatus) {
-        // Table-wide payment update sync
-        orders.forEach(o => {
-          if (Number(o.tableNumber) === Number(payload.data.tableNumber) && o.status !== 'completed') {
-            o.paymentStatus = payload.data.paymentStatus;
-          }
-        });
-      } else if (payload.data.id) {
+      if (payload.data.id) {
         const idx = orders.findIndex(o => o.id === payload.data.id);
         if (idx >= 0) {
           orders[idx] = { ...orders[idx], ...payload.data };
@@ -688,7 +632,6 @@ class Store extends EventTarget {
       totalAmount,
       specialNote,
       status: 'pending',
-      paymentStatus: 'unpaid',
       createdAt: new Date().toISOString()
     };
     
@@ -707,8 +650,7 @@ class Store extends EventTarget {
             table_number: Number(tableNumber),
             total_amount: totalAmount,
             special_note: specialNote || '',
-            status: 'pending',
-            payment_status: 'unpaid'
+            status: 'pending'
           }]);
 
         const orderItemsPayload = items.map(item => ({
@@ -759,56 +701,6 @@ class Store extends EventTarget {
                   if (err2) console.error("Supabase status update error:", err2);
                 });
             }
-          });
-      }
-    }
-  }
-
-  // --- Update Payment Status (Admin Authority: Paid vs Unpaid) ---
-  updatePaymentStatus(orderId, paymentStatus) {
-    const orders = this.getOrders();
-    const order = orders.find(o => o.id === orderId);
-    if (order) {
-      order.paymentStatus = paymentStatus;
-      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-      this.notify('order-updated', order);
-      this.publishCrossDevice('order-updated', order);
-
-      if (supabase) {
-        supabase
-          .from('orders')
-          .update({ payment_status: paymentStatus, updated_at: new Date().toISOString() })
-          .eq('id', orderId)
-          .then(({ error }) => {
-            if (error) console.error("Supabase payment status update error:", error);
-          });
-      }
-    }
-  }
-
-  // --- Update All Active Orders for a Table to Paid/Unpaid ---
-  updateTablePaymentStatus(tableNumber, paymentStatus) {
-    const orders = this.getOrders();
-    let count = 0;
-    orders.forEach(o => {
-      if (Number(o.tableNumber) === Number(tableNumber) && o.status !== 'completed') {
-        o.paymentStatus = paymentStatus;
-        count++;
-      }
-    });
-    if (count > 0) {
-      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
-      this.notify('order-updated', { tableNumber, paymentStatus });
-      this.publishCrossDevice('order-updated', { tableNumber, paymentStatus });
-
-      if (supabase) {
-        supabase
-          .from('orders')
-          .update({ payment_status: paymentStatus, updated_at: new Date().toISOString() })
-          .eq('table_number', Number(tableNumber))
-          .neq('status', 'completed')
-          .then(({ error }) => {
-            if (error) console.error("Supabase table payment status error:", error);
           });
       }
     }
@@ -1273,7 +1165,7 @@ function CustomerMenu({ activeTable, onSelectTable, onOpenStaffAuth }) {
   );
 }
 
-// --- Waiter Dashboard Component ---
+// --- Waiter Dashboard Component with Automatic Table Bill Calculator ---
 function WaiterDashboard() {
   const [tables, setTables] = useState(store.getTables());
   const [orders, setOrders] = useState(store.getOrders());
@@ -1290,6 +1182,7 @@ function WaiterDashboard() {
 
   const activeOrders = orders.filter(o => o.status !== 'completed');
 
+  // Group active orders by table number for automatic table bill calculation
   const tableBillsMap = useMemo(() => {
     const map = {};
     activeOrders.forEach(o => {
@@ -1298,15 +1191,11 @@ function WaiterDashboard() {
         map[tbl] = {
           tableNumber: tbl,
           orders: [],
-          totalBill: 0,
-          isPaid: true
+          totalBill: 0
         };
       }
       map[tbl].orders.push(o);
       map[tbl].totalBill += Number(o.totalAmount || 0);
-      if (o.paymentStatus !== 'paid') {
-        map[tbl].isPaid = false;
-      }
     });
     return map;
   }, [activeOrders]);
@@ -1319,7 +1208,7 @@ function WaiterDashboard() {
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
             <h1 className="text-xl font-bold">Waiter Service Dashboard</h1>
           </div>
-          <p className="text-xs text-stone-500">Live Table Bill Calculator & Payment Status Monitor</p>
+          <p className="text-xs text-stone-500">Live Table Bill Calculator & Order Monitor</p>
         </div>
 
         <button
@@ -1330,6 +1219,7 @@ function WaiterDashboard() {
         </button>
       </div>
 
+      {/* Floor Map with Automatic Table Bill Summary */}
       <div className="bg-white p-6 rounded-3xl shadow-sm border">
         <h2 className="text-xs font-bold uppercase text-stone-500 mb-4">Floor Map & Active Table Bills (16 Tables)</h2>
         <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-8 gap-3">
@@ -1337,7 +1227,6 @@ function WaiterDashboard() {
             const billInfo = tableBillsMap[t.id];
             const ords = billInfo ? billInfo.orders : [];
             const totalBill = billInfo ? billInfo.totalBill : 0;
-            const isPaid = billInfo ? billInfo.isPaid : false;
 
             const hasReady = ords.some(o => o.status === 'ready');
             const hasPreparing = ords.some(o => o.status === 'preparing');
@@ -1355,13 +1244,6 @@ function WaiterDashboard() {
                     <div className="text-[11px] font-black text-stone-900">
                       Bill: {formatPrice(totalBill)}
                     </div>
-                    <div className="flex justify-center">
-                      <span className={`text-[8px] font-extrabold uppercase px-1.5 py-0.2 rounded-full ${
-                        isPaid ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' : 'bg-rose-100 text-rose-800 border border-rose-300'
-                      }`}>
-                        {isPaid ? 'PAID' : 'UNPAID'}
-                      </span>
-                    </div>
                   </div>
                 )}
               </div>
@@ -1370,6 +1252,7 @@ function WaiterDashboard() {
         </div>
       </div>
 
+      {/* AUTOMATIC TABLE BILL SUMMARY & INDIVIDUAL ORDER BREAKDOWN */}
       <div className="bg-white p-6 rounded-3xl shadow-sm border space-y-4">
         <div className="flex justify-between items-center">
           <h2 className="text-xs font-bold uppercase text-stone-500">Active Tables & Bill Calculator ({Object.keys(tableBillsMap).length} Active Tables)</h2>
@@ -1382,6 +1265,7 @@ function WaiterDashboard() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {Object.values(tableBillsMap).map(tb => (
               <div key={tb.tableNumber} className="bg-stone-50 p-5 rounded-3xl border border-stone-200 space-y-4 shadow-sm">
+                {/* Table Total Header */}
                 <div className="flex justify-between items-center border-b border-stone-200 pb-3">
                   <div>
                     <h3 className="text-lg font-black text-stone-900">Table {tb.tableNumber}</h3>
@@ -1391,14 +1275,10 @@ function WaiterDashboard() {
                   <div className="text-right">
                     <div className="text-xs font-bold text-stone-500">Combined Table Total</div>
                     <div className="text-xl font-black text-amber-600">{formatPrice(tb.totalBill)}</div>
-                    <span className={`inline-block mt-0.5 text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
-                      tb.isPaid ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' : 'bg-rose-100 text-rose-800 border border-rose-300'
-                    }`}>
-                      Payment Status: {tb.isPaid ? 'PAID' : 'UNPAID'}
-                    </span>
                   </div>
                 </div>
 
+                {/* Individual Order Breakdown */}
                 <div className="space-y-2">
                   <span className="text-[10px] font-bold text-stone-400 uppercase tracking-wider block">Individual Orders Breakdown:</span>
                   {tb.orders.map(ord => (
@@ -1580,15 +1460,11 @@ function AdminPanel({ onOpenPrintQr }) {
         map[tbl] = {
           tableNumber: tbl,
           orders: [],
-          totalBill: 0,
-          isPaid: true
+          totalBill: 0
         };
       }
       map[tbl].orders.push(o);
       map[tbl].totalBill += Number(o.totalAmount || 0);
-      if (o.paymentStatus !== 'paid') {
-        map[tbl].isPaid = false;
-      }
     });
     return map;
   }, [activeOrders]);
@@ -1688,22 +1564,12 @@ function AdminPanel({ onOpenPrintQr }) {
     }
   };
 
-  const toggleOrderPayment = (orderId, currentStatus) => {
-    const nextStatus = currentStatus === 'paid' ? 'unpaid' : 'paid';
-    store.updatePaymentStatus(orderId, nextStatus);
-  };
-
-  const toggleTablePayment = (tableNumber, currentIsPaid) => {
-    const nextStatus = currentIsPaid ? 'unpaid' : 'paid';
-    store.updateTablePaymentStatus(tableNumber, nextStatus);
-  };
-
   return (
     <div className="min-h-screen bg-stone-100 p-4 md:p-8 max-w-6xl mx-auto space-y-6">
       <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h1 className="text-2xl font-black text-stone-900">Admin Control Panel</h1>
-          <p className="text-xs text-stone-500 mt-0.5">Manage Menu Items, Payment Status (Paid/Unpaid) & Table Bills</p>
+          <p className="text-xs text-stone-500 mt-0.5">Manage Food Items, Upload/Select Images & Printable QR Cards</p>
         </div>
 
         <div className="flex gap-2">
@@ -1723,12 +1589,12 @@ function AdminPanel({ onOpenPrintQr }) {
         </div>
       </div>
 
-      {/* TABLE BILL CALCULATOR & PAYMENT STATUS AUTHORITY SECTION */}
+      {/* TABLE BILL CALCULATOR OVERVIEW SECTION */}
       <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-200 space-y-4">
         <div className="flex justify-between items-center">
           <div>
-            <h2 className="text-xs font-black uppercase tracking-wider text-stone-500">Table Bill Calculator & Payment Authority</h2>
-            <p className="text-[10px] text-stone-400">Admin can change Payment Status: Unpaid ↔ Paid</p>
+            <h2 className="text-xs font-black uppercase tracking-wider text-stone-500">Table Bill Calculator Overview</h2>
+            <p className="text-[10px] text-stone-400">Sum total of all active orders per table</p>
           </div>
           <span className="text-[10px] bg-amber-100 text-amber-900 px-3 py-1 rounded-full font-extrabold">
             {Object.keys(adminTableBillsMap).length} Active Tables
@@ -1748,15 +1614,8 @@ function AdminPanel({ onOpenPrintQr }) {
                   </div>
 
                   <div className="text-right">
+                    <div className="text-xs font-bold text-stone-500">Combined Table Total</div>
                     <div className="text-lg font-black text-amber-600">{formatPrice(tb.totalBill)}</div>
-                    <button
-                      onClick={() => toggleTablePayment(tb.tableNumber, tb.isPaid)}
-                      className={`text-[9px] font-black uppercase px-2.5 py-1 rounded-full shadow-sm transition ${
-                        tb.isPaid ? 'bg-emerald-600 text-white hover:bg-emerald-700' : 'bg-rose-600 text-white hover:bg-rose-700'
-                      }`}
-                    >
-                      {tb.isPaid ? '✓ PAID (Click to set Unpaid)' : '✗ UNPAID (Click to set Paid)'}
-                    </button>
                   </div>
                 </div>
 
@@ -1767,14 +1626,11 @@ function AdminPanel({ onOpenPrintQr }) {
                         <span className="font-mono text-[10px] font-bold">#{ord.id}</span>
                         <span className="ml-2 text-stone-600">{formatPrice(ord.totalAmount)}</span>
                       </div>
-                      <button
-                        onClick={() => toggleOrderPayment(ord.id, ord.paymentStatus)}
-                        className={`text-[9px] font-bold px-2 py-0.5 rounded ${
-                          ord.paymentStatus === 'paid' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
-                        }`}
-                      >
-                        {ord.paymentStatus === 'paid' ? 'Paid' : 'Unpaid'}
-                      </button>
+                      <span className={`text-[9px] font-bold px-2 py-0.5 rounded ${
+                        ord.status === 'ready' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                      }`}>
+                        {ord.status}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -1784,10 +1640,10 @@ function AdminPanel({ onOpenPrintQr }) {
         )}
       </div>
 
-      {/* Live Orders Overview (Read-Only Status, Admin Payment Toggle) */}
+      {/* Live Orders Overview (Read-Only Status for Admin) */}
       <div className="bg-white p-6 rounded-3xl shadow-sm border border-stone-200 space-y-4">
         <div className="flex justify-between items-center">
-          <h2 className="text-xs font-black uppercase tracking-wider text-stone-500">Live Orders & Payment Overview</h2>
+          <h2 className="text-xs font-black uppercase tracking-wider text-stone-500">Live Orders Overview (Read-Only View)</h2>
           <span className="text-[10px] bg-stone-100 px-2.5 py-1 rounded-full font-bold text-stone-600">{orders.length} Total Orders</span>
         </div>
 
@@ -1800,9 +1656,9 @@ function AdminPanel({ onOpenPrintQr }) {
                 <tr className="border-b border-stone-200 text-stone-400 font-bold uppercase">
                   <th className="py-3 px-2">Order ID & Table</th>
                   <th className="py-3 px-2">Items Ordered</th>
-                  <th className="py-3 px-2">Amount</th>
-                  <th className="py-3 px-2">Order Status</th>
-                  <th className="py-3 px-2 text-right">Payment Status (Admin Toggle)</th>
+                  <th className="py-3 px-2">Special Note</th>
+                  <th className="py-3 px-2">Total Amount</th>
+                  <th className="py-3 px-2 text-right">Status (Read-Only)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-100">
@@ -1823,8 +1679,9 @@ function AdminPanel({ onOpenPrintQr }) {
                         <span className="text-stone-400 italic">No items listed</span>
                       )}
                     </td>
+                    <td className="py-3 px-2 text-stone-500 italic">{ord.specialNote || 'None'}</td>
                     <td className="py-3 px-2 font-black text-stone-900">{formatPrice(ord.totalAmount)}</td>
-                    <td className="py-3 px-2">
+                    <td className="py-3 px-2 text-right">
                       <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase ${
                         ord.status === 'ready' ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' :
                         ord.status === 'preparing' ? 'bg-amber-100 text-amber-800 border border-amber-300' :
@@ -1833,16 +1690,6 @@ function AdminPanel({ onOpenPrintQr }) {
                       }`}>
                         {ord.status}
                       </span>
-                    </td>
-                    <td className="py-3 px-2 text-right">
-                      <button
-                        onClick={() => toggleOrderPayment(ord.id, ord.paymentStatus)}
-                        className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase border transition ${
-                          ord.paymentStatus === 'paid' ? 'bg-emerald-500 text-white border-emerald-600 shadow-sm' : 'bg-rose-500 text-white border-rose-600'
-                        }`}
-                      >
-                        {ord.paymentStatus === 'paid' ? '✓ Paid' : '✗ Unpaid'}
-                      </button>
                     </td>
                   </tr>
                 ))}
